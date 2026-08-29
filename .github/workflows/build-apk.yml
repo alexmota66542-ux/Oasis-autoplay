@@ -74,6 +74,87 @@ jobs:
           }
           EOF
 
+          cat > gradle.properties <<'EOF'
+          android.useAndroidX=true
+          android.enableJetifier=true
+          org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+          EOF
+
+          cat > app/build.gradle <<'EOF'
+          plugins {
+              id 'com.android.application'
+          }
+
+          android {
+              namespace 'com.oasisautoplay'
+              compileSdk 34
+
+              defaultConfig {
+                  applicationId "com.oasisautoplay"
+                  minSdk 24
+                  targetSdk 34
+                  versionCode 2
+                  versionName "0.2"
+              }
+
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_1_8
+                  targetCompatibility JavaVersion.VERSION_1_8
+              }
+          }
+
+          dependencies {
+              implementation 'com.google.mlkit:text-recognition:16.0.1'
+          }
+          EOF
+
+      - name: Compilar APK
+        run: gradle assembleDebug
+
+      - name: Salvar APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Oasis-Autoplay-v0.2
+          path: app/build/outputs/apk/debug/app-debug.apk
+      - name: Preparar projeto Android
+        run: |
+          mkdir -p app/src/main/java/com/oasisautoplay
+          mkdir -p app/src/main/res/values
+          mkdir -p app/src/main/res/xml
+
+          cp MainActivity.java app/src/main/java/com/oasisautoplay/MainActivity.java
+          cp OasisAccessibilityService.java app/src/main/java/com/oasisautoplay/OasisAccessibilityService.java
+          cp AndroidManifest.xml app/src/main/AndroidManifest.xml
+          cp strings.xml app/src/main/res/values/strings.xml
+          cp accessibility_service_config.xml app/src/main/res/xml/accessibility_service_config.xml
+
+          cat > settings.gradle <<'EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+
+          rootProject.name = "OasisAutoplay"
+          include(":app")
+          EOF
+
+          cat > build.gradle <<'EOF'
+          plugins {
+              id 'com.android.application' version '8.5.2' apply false
+          }
+          EOF
+
           cat > app/build.gradle <<'EOF'
           plugins {
               id 'com.android.application'
