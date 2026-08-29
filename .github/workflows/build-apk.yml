@@ -5,9 +5,11 @@ on:
   push:
     branches:
       - main
+      - principal
     paths-ignore:
       - 'README.md'
       - '*.md'
+      - '*.txt'
 
 permissions:
   contents: read
@@ -16,8 +18,14 @@ jobs:
   build:
     runs-on: ubuntu-latest
 
+    env:
+      ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+      ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+      ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+      ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+
     steps:
-      - name: Baixar repositório
+      - name: Baixar repositorio
         uses: actions/checkout@v4
 
       - name: Configurar Java 17
@@ -38,9 +46,46 @@ jobs:
         with:
           gradle-version: '8.7'
 
-      - name: Preparar projeto Android
+      - name: Validar assinatura persistente
+        shell: bash
         run: |
-          set -e
+          set -euo pipefail
+
+          test -n "${ANDROID_KEYSTORE_BASE64}" || {
+            echo "ERRO: secret ANDROID_KEYSTORE_BASE64 ausente."
+            exit 1
+          }
+
+          test -n "${ANDROID_KEYSTORE_PASSWORD}" || {
+            echo "ERRO: secret ANDROID_KEYSTORE_PASSWORD ausente."
+            exit 1
+          }
+
+          test -n "${ANDROID_KEY_ALIAS}" || {
+            echo "ERRO: secret ANDROID_KEY_ALIAS ausente."
+            exit 1
+          }
+
+          test -n "${ANDROID_KEY_PASSWORD}" || {
+            echo "ERRO: secret ANDROID_KEY_PASSWORD ausente."
+            exit 1
+          }
+
+          printf '%s' "${ANDROID_KEYSTORE_BASE64}" | base64 --decode \
+            > "${RUNNER_TEMP}/oasis-autoplay-release.jks"
+
+          keytool -list \
+            -keystore "${RUNNER_TEMP}/oasis-autoplay-release.jks" \
+            -storepass "${ANDROID_KEYSTORE_PASSWORD}" \
+            -alias "${ANDROID_KEY_ALIAS}" \
+            >/dev/null
+
+          echo "Assinatura persistente validada."
+
+      - name: Preparar projeto Android
+        shell: bash
+        run: |
+          set -euo pipefail
 
           mkdir -p app/src/main/java/com/oasisautoplay
           mkdir -p app/src/main/res/values
@@ -62,19 +107,18 @@ jobs:
           cp accessibility_service_config.xml \
             app/src/main/res/xml/accessibility_service_config.xml
 
-          # Referência visual usada para reconhecer os Trolls.
-          # Funciona com o arquivo dentro de assets/
-          # ou diretamente na raiz do repositório.
-          if [ -f "assets/troll_reference.png" ]; then
-            cp assets/troll_reference.png \
-              app/src/main/assets/troll_reference.png
-          elif [ -f "troll_reference.png" ]; then
-            cp troll_reference.png \
-              app/src/main/assets/troll_reference.png
-          else
-            echo "ERRO: troll_reference.png não encontrado."
+          shopt -s nullglob
+          ROOT_ASSETS=( *.png )
+
+          if [ ${#ROOT_ASSETS[@]} -eq 0 ]; then
+            echo "ERRO: nenhuma imagem PNG encontrada na raiz."
             exit 1
           fi
+
+          echo "Imagens encontradas: ${#ROOT_ASSETS[@]}"
+
+          cp -v "${ROOT_ASSETS[@]}" \
+            app/src/main/assets/
 
           cat > settings.gradle <<'EOF'
           pluginManagement {
@@ -109,7 +153,7 @@ jobs:
           org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
           EOF
 
-          cat > app/build.gradle <<EOF
+          cat > app/build.gradle <<'EOF'
           plugins {
               id 'com.android.application'
           }
@@ -123,8 +167,41 @@ jobs:
                   minSdk 24
                   targetSdk 34
 
-                  versionCode ${GITHUB_RUN_NUMBER}
-                  versionName "build-${GITHUB_RUN_NUMBER}"
+                  versionCode Integer.parseInt(
+                      System.getenv("GITHUB_RUN_NUMBER")
+                  )
+
+                  versionName "build-" +
+                      System.getenv("GITHUB_RUN_NUMBER")
+              }
+
+              signingConfigs {
+                  release {
+                      storeFile file(
+                          System.getenv("RUNNER_TEMP") +
+                          "/oasis-autoplay-release.jks"
+                      )
+
+                      storePassword System.getenv(
+                          "ANDROID_KEYSTORE_PASSWORD"
+                      )
+
+                      keyAlias System.getenv(
+                          "ANDROID_KEY_ALIAS"
+                      )
+
+                      keyPassword System.getenv(
+                          "ANDROID_KEY_PASSWORD"
+                      )
+                  }
+              }
+
+              buildTypes {
+                  release {
+                      signingConfig signingConfigs.release
+                      minifyEnabled false
+                      shrinkResources false
+                  }
               }
 
               compileOptions {
@@ -139,13 +216,35 @@ jobs:
           EOF
 
       - name: Compilar APK
+        shell: bash
         run: |
-          gradle assembleDebug --stacktrace
+          set -euo pipefail
+          gradle assembleRelease --stacktrace
+
+      - name: Verificar assinatura
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APK="app/build/outputs/apk/release/app-release.apk"
+
+          test -f "${APK}" || {
+            echo "ERRO: APK nao foi gerado."
+            exit 1
+          }
+
+          "${ANDROID_HOME}/build-tools/34.0.0/apksigner" verify \
+            --verbose \
+            --print-certs \
+            "${APK}"
 
       - name: Renomear APK
+        shell: bash
         run: |
-          cp app/build/outputs/apk/debug/app-debug.apk \
-             "Oasis-Autoplay-build-${GITHUB_RUN_NUMBER}.apk"
+          set -euo pipefail
+
+          cp app/build/outputs/apk/release/app-release.apk \
+            "Oasis-Autoplay-build-${GITHUB_RUN_NUMBER}.apk"
 
       - name: Salvar APK
         uses: actions/upload-artifact@v4
