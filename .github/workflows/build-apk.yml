@@ -215,6 +215,219 @@ jobs:
           }
           EOF
 
+      - name: Corrigir motor visual e combate
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path('app/src/main/java/com/oasisautoplay/OasisAccessibilityService.java')
+          s = p.read_text(encoding='utf-8')
+
+          def replace_once(old, new, label):
+              global s
+              if old not in s:
+                  raise SystemExit(f'PATCH FALHOU: bloco não encontrado: {label}')
+              s = s.replace(old, new, 1)
+              print('PATCH OK:', label)
+
+          replace_once(
+          '''        // Fluxo de combate estrito: enquanto uma tela específica é esperada,
+          // nenhuma rotina paralela pode começar a clicar em outros controles.
+          if (combatContext
+                  && expectedVisualScene != VisualScene.UNKNOWN
+                  && !isCompatibleFlowScene(expectedVisualScene, visualScene)) {
+
+              long elapsed = now - flowStepSinceMs;
+
+              if (elapsed < FLOW_STEP_WAIT_MS) {
+                  nextAllowedAnalysisMs = now + 250;
+                  return;
+              }
+
+              flowFailureCount++;
+              saveFlowFailures(flowFailureCount);
+
+              if (flowFailureCount >= FLOW_MAX_RETRIES) {
+                  setVisibleStateOnly(
+                          "Combate pausado: esperava " +
+                          expectedVisualScene.name() +
+                          " / viu " + visualScene.name()
+                  );
+                  nextAllowedAnalysisMs = now + 1000;
+                  return;
+              }
+          }
+          ''',
+          '''        // Fluxo orientado pela tela observada. O estado esperado nunca pode
+          // aprisionar o motor se a captura real já mudou de tela.
+          if (combatContext
+                  && expectedVisualScene != VisualScene.UNKNOWN
+                  && !isCompatibleFlowScene(expectedVisualScene, visualScene)) {
+
+              long elapsed = now - flowStepSinceMs;
+              boolean observedKnownScene = visualScene != VisualScene.UNKNOWN;
+
+              if (!observedKnownScene && elapsed < FLOW_STEP_WAIT_MS) {
+                  nextAllowedAnalysisMs = now + 250;
+                  return;
+              }
+
+              if (elapsed >= FLOW_STEP_WAIT_MS) {
+                  flowFailureCount++;
+                  saveFlowFailures(flowFailureCount);
+                  flowStepSinceMs = now;
+              }
+
+              if (observedKnownScene || flowFailureCount >= FLOW_MAX_RETRIES) {
+                  VisualScene previousExpected = expectedVisualScene;
+                  expectedVisualScene = VisualScene.UNKNOWN;
+                  flowFailureCount = 0;
+                  saveFlowExpected(expectedVisualScene);
+                  saveFlowFailures(0);
+
+                  setVisibleStateOnly(
+                          "Ressincronizando: esperava " +
+                          previousExpected.name() +
+                          " / viu " + visualScene.name()
+                  );
+              } else {
+                  nextAllowedAnalysisMs = now + 300;
+                  return;
+              }
+          }
+          ''',
+          'ressincronização observacional')
+
+          replace_once(
+          '''        if (combatContext && !attackBuffUsed
+                  && magicSpellSelected
+                  && attackTargetTapped
+                  && !detectMagicScreen(b)
+                  && !detectSpellTargetMode(b)) {
+
+              // buff aguardando confirmação visual;
+              magicSpellSelected = false;
+              attackTargetTapped = false;
+              magicPhaseSinceMs = 0;
+              setState(EngineState.BATTLEFIELD, "Attack confirmado");
+              nextAllowedAnalysisMs = now + 500;
+          }
+          ''',
+          '''        if (combatContext && !attackBuffUsed
+                  && magicSpellSelected
+                  && attackTargetTapped
+                  && !detectMagicScreen(b)
+                  && !detectSpellTargetMode(b)) {
+
+              attackBuffUsed = true;
+              resetMagicScan();
+              magicSpellSelected = false;
+              attackTargetTapped = false;
+              magicPhaseSinceMs = 0;
+              expectedVisualScene = VisualScene.UNKNOWN;
+              flowFailureCount = 0;
+              saveFlowExpected(expectedVisualScene);
+              saveFlowFailures(0);
+              setState(
+                      EngineState.BATTLEFIELD,
+                      "Buff Attack confirmado; iniciar ataques"
+              );
+              nextAllowedAnalysisMs = now + 700;
+              return;
+          }
+          ''',
+          'confirmação real do buff')
+
+          replace_once(
+          '''                expectFlowScene(
+                          VisualScene.BATTLEFIELD_AFTER_ACTION,
+                          now
+                  );
+          ''',
+          '''                expectedVisualScene = VisualScene.UNKNOWN;
+                  flowFailureCount = 0;
+                  saveFlowExpected(expectedVisualScene);
+                  saveFlowFailures(0);
+          ''',
+          'seleção de magia sem expectativa rígida')
+
+          replace_once(
+          '''        if (!combatContext
+                  && (visualScene == VisualScene.TARGET_MENU
+                      || detectTargetMenu(b))) {
+          ''',
+          '''        if (visualScene == VisualScene.TARGET_MENU
+                  || (!combatContext && detectTargetMenu(b))) {
+          ''',
+          'menu de alvo guiado pela tela')
+
+          replace_once(
+          '''        VisualScene routeScene = classifyVisualScene(b);
+          if (routeScene != VisualScene.MAP
+                  || lastVisualConfidence < 0.58) {
+
+              setRouteStep(
+                      "Rota aguardando MAP confiável; " +
+                      routeScene.name() + " " +
+                      String.format(
+                              java.util.Locale.US,
+                              "%.2f",
+                              lastVisualConfidence
+                      )
+              );
+
+              nextAllowedAnalysisMs = now + 550;
+              return;
+          }
+          ''',
+          '''        VisualScene routeScene = classifyVisualScene(b);
+
+          boolean blockingUi = detectTargetMenu(b)
+                  || detectTurnMenu(b)
+                  || detectMagicScreen(b)
+                  || detectSpellTargetMode(b)
+                  || detectVictory(b)
+                  || detectReward(b)
+                  || findStackCandidates(b).size() >= 2;
+
+          boolean mapAccepted =
+                  routeScene == VisualScene.MAP
+                  || (routeScene == VisualScene.UNKNOWN && !blockingUi);
+
+          if (!mapAccepted
+                  || (routeScene == VisualScene.MAP
+                      && lastVisualConfidence < 0.50)) {
+
+              setRouteStep(
+                      "Rota aguardando mapa seguro; " +
+                      routeScene.name() + " " +
+                      String.format(
+                              java.util.Locale.US,
+                              "%.2f",
+                              lastVisualConfidence
+                      )
+              );
+
+              nextAllowedAnalysisMs = now + 550;
+              return;
+          }
+          ''',
+          'rota com fallback seguro para UNKNOWN')
+
+          replace_once(
+              '    private static final double TROLL_MATCH_MIN = 0.58;',
+              '    private static final double TROLL_MATCH_MIN = 0.52;',
+              'limiar Troll com confirmação pelo menu')
+
+          p.write_text(s, encoding='utf-8')
+
+          print(
+              'PATCH COMPLETO: motor visual reativo, buff e rota corrigidos'
+          )
+          PY
+
       - name: Compilar APK
         shell: bash
         run: |
