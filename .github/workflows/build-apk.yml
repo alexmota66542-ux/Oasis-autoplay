@@ -50,29 +50,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          test -n "${ANDROID_KEYSTORE_BASE64}" || { echo "ERRO: secret ANDROID_KEYSTORE_BASE64 ausente."; exit 1; }
+          test -n "${ANDROID_KEYSTORE_PASSWORD}" || { echo "ERRO: secret ANDROID_KEYSTORE_PASSWORD ausente."; exit 1; }
+          test -n "${ANDROID_KEY_ALIAS}" || { echo "ERRO: secret ANDROID_KEY_ALIAS ausente."; exit 1; }
+          test -n "${ANDROID_KEY_PASSWORD}" || { echo "ERRO: secret ANDROID_KEY_PASSWORD ausente."; exit 1; }
 
-          test -n "${ANDROID_KEYSTORE_BASE64}" || {
-            echo "ERRO: secret ANDROID_KEYSTORE_BASE64 ausente."
-            exit 1
-          }
-
-          test -n "${ANDROID_KEYSTORE_PASSWORD}" || {
-            echo "ERRO: secret ANDROID_KEYSTORE_PASSWORD ausente."
-            exit 1
-          }
-
-          test -n "${ANDROID_KEY_ALIAS}" || {
-            echo "ERRO: secret ANDROID_KEY_ALIAS ausente."
-            exit 1
-          }
-
-          test -n "${ANDROID_KEY_PASSWORD}" || {
-            echo "ERRO: secret ANDROID_KEY_PASSWORD ausente."
-            exit 1
-          }
-
-          printf '%s' "${ANDROID_KEYSTORE_BASE64}" | base64 --decode \
-            > "${RUNNER_TEMP}/oasis-autoplay-release.jks"
+          printf '%s' "${ANDROID_KEYSTORE_BASE64}" | base64 --decode > "${RUNNER_TEMP}/oasis-autoplay-release.jks"
 
           keytool -list \
             -keystore "${RUNNER_TEMP}/oasis-autoplay-release.jks" \
@@ -92,33 +75,20 @@ jobs:
           mkdir -p app/src/main/res/xml
           mkdir -p app/src/main/assets
 
-          cp MainActivity.java \
-            app/src/main/java/com/oasisautoplay/MainActivity.java
-
-          cp OasisAccessibilityService.java \
-            app/src/main/java/com/oasisautoplay/OasisAccessibilityService.java
-
-          cp AndroidManifest.xml \
-            app/src/main/AndroidManifest.xml
-
-          cp strings.xml \
-            app/src/main/res/values/strings.xml
-
-          cp accessibility_service_config.xml \
-            app/src/main/res/xml/accessibility_service_config.xml
+          cp MainActivity.java app/src/main/java/com/oasisautoplay/MainActivity.java
+          cp OasisAccessibilityService.java app/src/main/java/com/oasisautoplay/OasisAccessibilityService.java
+          cp AndroidManifest.xml app/src/main/AndroidManifest.xml
+          cp strings.xml app/src/main/res/values/strings.xml
+          cp accessibility_service_config.xml app/src/main/res/xml/accessibility_service_config.xml
 
           shopt -s nullglob
           ROOT_ASSETS=( *.png )
-
           if [ ${#ROOT_ASSETS[@]} -eq 0 ]; then
             echo "ERRO: nenhuma imagem PNG encontrada na raiz."
             exit 1
           fi
-
           echo "Imagens encontradas: ${#ROOT_ASSETS[@]}"
-
-          cp -v "${ROOT_ASSETS[@]}" \
-            app/src/main/assets/
+          cp -v "${ROOT_ASSETS[@]}" app/src/main/assets/
 
           cat > settings.gradle <<'EOF'
           pluginManagement {
@@ -166,33 +136,16 @@ jobs:
                   applicationId "com.oasisautoplay"
                   minSdk 24
                   targetSdk 34
-
-                  versionCode Integer.parseInt(
-                      System.getenv("GITHUB_RUN_NUMBER")
-                  )
-
-                  versionName "build-" +
-                      System.getenv("GITHUB_RUN_NUMBER")
+                  versionCode Integer.parseInt(System.getenv("GITHUB_RUN_NUMBER"))
+                  versionName "build-" + System.getenv("GITHUB_RUN_NUMBER")
               }
 
               signingConfigs {
                   release {
-                      storeFile file(
-                          System.getenv("RUNNER_TEMP") +
-                          "/oasis-autoplay-release.jks"
-                      )
-
-                      storePassword System.getenv(
-                          "ANDROID_KEYSTORE_PASSWORD"
-                      )
-
-                      keyAlias System.getenv(
-                          "ANDROID_KEY_ALIAS"
-                      )
-
-                      keyPassword System.getenv(
-                          "ANDROID_KEY_PASSWORD"
-                      )
+                      storeFile file(System.getenv("RUNNER_TEMP") + "/oasis-autoplay-release.jks")
+                      storePassword System.getenv("ANDROID_KEYSTORE_PASSWORD")
+                      keyAlias System.getenv("ANDROID_KEY_ALIAS")
+                      keyPassword System.getenv("ANDROID_KEY_PASSWORD")
                   }
               }
 
@@ -215,444 +168,6 @@ jobs:
           }
           EOF
 
-      - name: Atualizar motor visual e combate
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          python3 - <<'PY'
-          from pathlib import Path
-          import re
-
-          path = Path(
-              "app/src/main/java/com/oasisautoplay/"
-              "OasisAccessibilityService.java"
-          )
-
-          s = path.read_text(encoding="utf-8")
-
-          def patch_regex(pattern, replacement, label, flags=re.S):
-              global s
-
-              new_s, count = re.subn(
-                  pattern,
-                  replacement,
-                  s,
-                  count=1,
-                  flags=flags
-              )
-
-              if count != 1:
-                  raise SystemExit(
-                      f"PATCH FALHOU: {label} | encontrados={count}"
-                  )
-
-              s = new_s
-              print(f"PATCH OK: {label}")
-
-          # -----------------------------------------------------
-          # 1. Ressincronização do fluxo de combate
-          # -----------------------------------------------------
-
-          pattern = r'''
-          if\s*\(
-              combatContext
-              \s*&&\s*
-              expectedVisualScene\s*!=\s*VisualScene\.UNKNOWN
-              \s*&&\s*
-              !isCompatibleFlowScene
-              \(
-                  expectedVisualScene,\s*
-                  visualScene
-              \)
-          \)\s*\{
-              .*?
-              if\s*\(
-                  flowFailureCount\s*>=\s*FLOW_MAX_RETRIES
-              \)\s*\{
-                  .*?
-                  return;
-              \s*\}
-          \s*\}
-          '''
-
-          replacement = '''
-          if (combatContext
-                  && expectedVisualScene != VisualScene.UNKNOWN
-                  && !isCompatibleFlowScene(
-                          expectedVisualScene,
-                          visualScene)) {
-
-              long elapsed =
-                      now - flowStepSinceMs;
-
-              boolean observedKnownScene =
-                      visualScene != VisualScene.UNKNOWN;
-
-              if (!observedKnownScene
-                      && elapsed < FLOW_STEP_WAIT_MS) {
-
-                  nextAllowedAnalysisMs =
-                          now + 250;
-
-                  return;
-              }
-
-              if (elapsed >= FLOW_STEP_WAIT_MS) {
-                  flowFailureCount++;
-                  saveFlowFailures(
-                          flowFailureCount
-                  );
-
-                  flowStepSinceMs = now;
-              }
-
-              if (observedKnownScene
-                      || flowFailureCount
-                      >= FLOW_MAX_RETRIES) {
-
-                  VisualScene previousExpected =
-                          expectedVisualScene;
-
-                  expectedVisualScene =
-                          VisualScene.UNKNOWN;
-
-                  flowFailureCount = 0;
-
-                  saveFlowExpected(
-                          expectedVisualScene
-                  );
-
-                  saveFlowFailures(0);
-
-                  setVisibleStateOnly(
-                          "Ressincronizando: esperava "
-                          + previousExpected.name()
-                          + " / viu "
-                          + visualScene.name()
-                  );
-
-                  // Não retorna.
-                  // A captura real continua decidindo
-                  // a próxima ação.
-              } else {
-                  nextAllowedAnalysisMs =
-                          now + 300;
-
-                  return;
-              }
-          }
-          '''
-
-          patch_regex(
-              pattern,
-              replacement,
-              "ressincronização visual"
-          )
-
-          # -----------------------------------------------------
-          # 2. Corrige confirmação do buff
-          # -----------------------------------------------------
-
-          pattern = r'''
-          if\s*\(
-              combatContext\s*&&\s*!attackBuffUsed
-              \s*&&\s*magicSpellSelected
-              \s*&&\s*attackTargetTapped
-              \s*&&\s*!detectMagicScreen\(b\)
-              \s*&&\s*!detectSpellTargetMode\(b\)
-          \)\s*\{
-              .*?
-              setState
-              \(
-                  EngineState\.BATTLEFIELD,
-                  \s*"Attack confirmado"
-              \);
-              .*?
-          \}
-          '''
-
-          replacement = '''
-          if (combatContext
-                  && !attackBuffUsed
-                  && magicSpellSelected
-                  && attackTargetTapped
-                  && !detectMagicScreen(b)
-                  && !detectSpellTargetMode(b)) {
-
-              attackBuffUsed = true;
-
-              resetMagicScan();
-
-              magicSpellSelected = false;
-              attackTargetTapped = false;
-              magicPhaseSinceMs = 0;
-
-              expectedVisualScene =
-                      VisualScene.UNKNOWN;
-
-              flowFailureCount = 0;
-
-              saveFlowExpected(
-                      expectedVisualScene
-              );
-
-              saveFlowFailures(0);
-
-              setState(
-                      EngineState.BATTLEFIELD,
-                      "Buff Attack confirmado; "
-                      + "iniciar ataques"
-              );
-
-              nextAllowedAnalysisMs =
-                      now + 700;
-
-              return;
-          }
-          '''
-
-          patch_regex(
-              pattern,
-              replacement,
-              "confirmação definitiva do buff"
-          )
-
-          # -----------------------------------------------------
-          # 3. Não exigir AFTER_ACTION depois de Selecionar
-          # -----------------------------------------------------
-
-          pattern = r'''
-          expectFlowScene
-          \(
-              \s*VisualScene\.BATTLEFIELD_AFTER_ACTION,
-              \s*now
-          \);
-          '''
-
-          replacement = '''
-          expectedVisualScene =
-                  VisualScene.UNKNOWN;
-
-          flowFailureCount = 0;
-
-          saveFlowExpected(
-                  expectedVisualScene
-          );
-
-          saveFlowFailures(0);
-          '''
-
-          patch_regex(
-              pattern,
-              replacement,
-              "retorno flexível após Selecionar"
-          )
-
-          # -----------------------------------------------------
-          # 4. Menu do Troll pode assumir o fluxo
-          # -----------------------------------------------------
-
-          pattern = r'''
-          if\s*\(
-              !combatContext
-              \s*&&\s*
-              \(
-                  visualScene\s*==\s*
-                  VisualScene\.TARGET_MENU
-                  \s*\|\|\s*
-                  detectTargetMenu\(b\)
-              \)
-          \)\s*\{
-          '''
-
-          replacement = '''
-          if (visualScene == VisualScene.TARGET_MENU
-                  || (!combatContext
-                      && detectTargetMenu(b))) {
-          '''
-
-          patch_regex(
-              pattern,
-              replacement,
-              "recuperação do menu do Troll"
-          )
-
-          # -----------------------------------------------------
-          # 5. Rota aceita UNKNOWN quando não existe UI bloqueante
-          # -----------------------------------------------------
-
-          pattern = r'''
-          VisualScene\s+routeScene\s*=
-              \s*classifyVisualScene\(b\);
-          \s*
-          if\s*\(
-              routeScene\s*!=\s*VisualScene\.MAP
-              \s*\|\|\s*
-              lastVisualConfidence\s*<\s*0\.58
-          \)\s*\{
-              .*?
-              return;
-          \s*\}
-          '''
-
-          replacement = '''
-          VisualScene routeScene =
-                  classifyVisualScene(b);
-
-          boolean blockingUi =
-                  detectTargetMenu(b)
-                  || detectTurnMenu(b)
-                  || detectMagicScreen(b)
-                  || detectSpellTargetMode(b)
-                  || detectVictory(b)
-                  || detectReward(b)
-                  || findStackCandidates(b).size() >= 2;
-
-          boolean mapAccepted =
-                  routeScene == VisualScene.MAP
-                  || (
-                      routeScene == VisualScene.UNKNOWN
-                      && !blockingUi
-                  );
-
-          if (!mapAccepted
-                  || (
-                      routeScene == VisualScene.MAP
-                      && lastVisualConfidence < 0.50
-                  )) {
-
-              setRouteStep(
-                      "Rota aguardando mapa seguro; "
-                      + routeScene.name()
-                      + " "
-                      + String.format(
-                              java.util.Locale.US,
-                              "%.2f",
-                              lastVisualConfidence
-                      )
-              );
-
-              nextAllowedAnalysisMs =
-                      now + 550;
-
-              return;
-          }
-          '''
-
-          patch_regex(
-              pattern,
-              replacement,
-              "rota tolerante a UNKNOWN"
-          )
-
-          # -----------------------------------------------------
-          # 6. Ajusta sensibilidade da referência do Troll
-          # -----------------------------------------------------
-
-          new_s, count = re.subn(
-              r'''
-              (
-                  private\s+static\s+final\s+double
-                  \s+TROLL_MATCH_MIN\s*=\s*
-              )
-              0\.58
-              \s*;
-              ''',
-              r'\g<1>0.52;',
-              s,
-              count=1,
-              flags=re.X
-          )
-
-          if count == 1:
-              s = new_s
-              print(
-                  "PATCH OK: sensibilidade visual do Troll"
-              )
-          elif "TROLL_MATCH_MIN = 0.52" in s:
-              print(
-                  "PATCH OK: sensibilidade já estava em 0.52"
-              )
-          else:
-              raise SystemExit(
-                  "PATCH FALHOU: "
-                  "constante TROLL_MATCH_MIN não encontrada"
-              )
-
-          # -----------------------------------------------------
-          # Validações estruturais
-          # -----------------------------------------------------
-
-          checks = {
-              "ressincronização":
-                  "Ressincronizando: esperava" in s,
-
-              "buff definitivo":
-                  "attackBuffUsed = true;" in s,
-
-              "fluxo flexível":
-                  "retorno flexível" not in s
-                  and
-                  "VisualScene.BATTLEFIELD_AFTER_ACTION"
-                  in s,
-
-              "rota segura":
-                  "boolean mapAccepted" in s,
-
-              "blockingUi":
-                  "boolean blockingUi" in s,
-
-              "troll 0.52":
-                  "TROLL_MATCH_MIN = 0.52" in s,
-          }
-
-          for name, ok in checks.items():
-              print(
-                  f"CHECK {name}: "
-                  + ("PASS" if ok else "FAIL")
-              )
-
-              if not ok:
-                  raise SystemExit(
-                      f"VALIDAÇÃO FALHOU: {name}"
-                  )
-
-          path.write_text(
-              s,
-              encoding="utf-8"
-          )
-
-          print(
-              "ATUALIZAÇÃO DO MOTOR CONCLUÍDA"
-          )
-          PY
-
-      - name: Validar Java modificado
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          FILE="app/src/main/java/com/oasisautoplay/OasisAccessibilityService.java"
-
-          grep -q \
-            "Ressincronizando: esperava" \
-            "${FILE}"
-
-          grep -q \
-            "boolean mapAccepted" \
-            "${FILE}"
-
-          grep -q \
-            "TROLL_MATCH_MIN = 0.52" \
-            "${FILE}"
-
-          grep -q \
-            "Buff Attack confirmado" \
-            "${FILE}"
-
-          echo "Validação estrutural concluída."
-
       - name: Compilar APK
         shell: bash
         run: |
@@ -663,26 +178,15 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
           APK="app/build/outputs/apk/release/app-release.apk"
-
-          test -f "${APK}" || {
-            echo "ERRO: APK nao foi gerado."
-            exit 1
-          }
-
-          "${ANDROID_HOME}/build-tools/34.0.0/apksigner" verify \
-            --verbose \
-            --print-certs \
-            "${APK}"
+          test -f "${APK}" || { echo "ERRO: APK nao foi gerado."; exit 1; }
+          "${ANDROID_HOME}/build-tools/34.0.0/apksigner" verify --verbose --print-certs "${APK}"
 
       - name: Renomear APK
         shell: bash
         run: |
           set -euo pipefail
-
-          cp app/build/outputs/apk/release/app-release.apk \
-            "Oasis-Autoplay-build-${GITHUB_RUN_NUMBER}.apk"
+          cp app/build/outputs/apk/release/app-release.apk "Oasis-Autoplay-build-${GITHUB_RUN_NUMBER}.apk"
 
       - name: Salvar APK
         uses: actions/upload-artifact@v4
