@@ -28,13 +28,61 @@ jobs:
 
       - name: Instalar Android 34
         run: |
-          yes | sdkmanager "platforms;android-34" "build-tools;34.0.0"
+          sdkmanager "platforms;android-34" "build-tools;34.0.0"
 
       - name: Configurar Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.7'
 
+      - name: Preparar projeto Android
+        run: |
+          set -e
+
+          mkdir -p app/src/main/java/com/oasisautoplay
+          mkdir -p app/src/main/res/values
+          mkdir -p app/src/main/res/xml
+
+          cp MainActivity.java app/src/main/java/com/oasisautoplay/MainActivity.java
+          cp OasisAccessibilityService.java app/src/main/java/com/oasisautoplay/OasisAccessibilityService.java
+          cp AndroidManifest.xml app/src/main/AndroidManifest.xml
+          cp strings.xml app/src/main/res/values/strings.xml
+          cp accessibility_service_config.xml app/src/main/res/xml/accessibility_service_config.xml
+
+          cat > settings.gradle <<'EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+
+          rootProject.name = "OasisAutoplay"
+          include(":app")
+          EOF
+
+          cat > build.gradle <<'EOF'
+          plugins {
+              id 'com.android.application' version '8.5.2' apply false
+          }
+          EOF
+
+          cat > gradle.properties <<'EOF'
+          android.useAndroidX=true
+          android.enableJetifier=true
+          org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+          EOF
+
+          cat > app/build.gradle <<
       - name: Preparar projeto Android
         run: |
           mkdir -p app/src/main/java/com/oasisautoplay
