@@ -215,176 +215,293 @@ jobs:
           }
           EOF
 
-      - name: Corrigir motor visual e combate
+      - name: Atualizar motor visual e combate
         shell: bash
         run: |
           set -euo pipefail
+
           python3 - <<'PY'
           from pathlib import Path
+          import re
 
-          p = Path('app/src/main/java/com/oasisautoplay/OasisAccessibilityService.java')
-          s = p.read_text(encoding='utf-8')
+          path = Path(
+              "app/src/main/java/com/oasisautoplay/"
+              "OasisAccessibilityService.java"
+          )
 
-          def replace_once(old, new, label):
+          s = path.read_text(encoding="utf-8")
+
+          def patch_regex(pattern, replacement, label, flags=re.S):
               global s
-              if old not in s:
-                  raise SystemExit(f'PATCH FALHOU: bloco não encontrado: {label}')
-              s = s.replace(old, new, 1)
-              print('PATCH OK:', label)
 
-          replace_once(
-          '''        // Fluxo de combate estrito: enquanto uma tela específica é esperada,
-          // nenhuma rotina paralela pode começar a clicar em outros controles.
+              new_s, count = re.subn(
+                  pattern,
+                  replacement,
+                  s,
+                  count=1,
+                  flags=flags
+              )
+
+              if count != 1:
+                  raise SystemExit(
+                      f"PATCH FALHOU: {label} | encontrados={count}"
+                  )
+
+              s = new_s
+              print(f"PATCH OK: {label}")
+
+          # -----------------------------------------------------
+          # 1. Ressincronização do fluxo de combate
+          # -----------------------------------------------------
+
+          pattern = r'''
+          if\s*\(
+              combatContext
+              \s*&&\s*
+              expectedVisualScene\s*!=\s*VisualScene\.UNKNOWN
+              \s*&&\s*
+              !isCompatibleFlowScene
+              \(
+                  expectedVisualScene,\s*
+                  visualScene
+              \)
+          \)\s*\{
+              .*?
+              if\s*\(
+                  flowFailureCount\s*>=\s*FLOW_MAX_RETRIES
+              \)\s*\{
+                  .*?
+                  return;
+              \s*\}
+          \s*\}
+          '''
+
+          replacement = '''
           if (combatContext
                   && expectedVisualScene != VisualScene.UNKNOWN
-                  && !isCompatibleFlowScene(expectedVisualScene, visualScene)) {
+                  && !isCompatibleFlowScene(
+                          expectedVisualScene,
+                          visualScene)) {
 
-              long elapsed = now - flowStepSinceMs;
+              long elapsed =
+                      now - flowStepSinceMs;
 
-              if (elapsed < FLOW_STEP_WAIT_MS) {
-                  nextAllowedAnalysisMs = now + 250;
-                  return;
-              }
+              boolean observedKnownScene =
+                      visualScene != VisualScene.UNKNOWN;
 
-              flowFailureCount++;
-              saveFlowFailures(flowFailureCount);
+              if (!observedKnownScene
+                      && elapsed < FLOW_STEP_WAIT_MS) {
 
-              if (flowFailureCount >= FLOW_MAX_RETRIES) {
-                  setVisibleStateOnly(
-                          "Combate pausado: esperava " +
-                          expectedVisualScene.name() +
-                          " / viu " + visualScene.name()
-                  );
-                  nextAllowedAnalysisMs = now + 1000;
-                  return;
-              }
-          }
-          ''',
-          '''        // Fluxo orientado pela tela observada. O estado esperado nunca pode
-          // aprisionar o motor se a captura real já mudou de tela.
-          if (combatContext
-                  && expectedVisualScene != VisualScene.UNKNOWN
-                  && !isCompatibleFlowScene(expectedVisualScene, visualScene)) {
+                  nextAllowedAnalysisMs =
+                          now + 250;
 
-              long elapsed = now - flowStepSinceMs;
-              boolean observedKnownScene = visualScene != VisualScene.UNKNOWN;
-
-              if (!observedKnownScene && elapsed < FLOW_STEP_WAIT_MS) {
-                  nextAllowedAnalysisMs = now + 250;
                   return;
               }
 
               if (elapsed >= FLOW_STEP_WAIT_MS) {
                   flowFailureCount++;
-                  saveFlowFailures(flowFailureCount);
+                  saveFlowFailures(
+                          flowFailureCount
+                  );
+
                   flowStepSinceMs = now;
               }
 
-              if (observedKnownScene || flowFailureCount >= FLOW_MAX_RETRIES) {
-                  VisualScene previousExpected = expectedVisualScene;
-                  expectedVisualScene = VisualScene.UNKNOWN;
+              if (observedKnownScene
+                      || flowFailureCount
+                      >= FLOW_MAX_RETRIES) {
+
+                  VisualScene previousExpected =
+                          expectedVisualScene;
+
+                  expectedVisualScene =
+                          VisualScene.UNKNOWN;
+
                   flowFailureCount = 0;
-                  saveFlowExpected(expectedVisualScene);
+
+                  saveFlowExpected(
+                          expectedVisualScene
+                  );
+
                   saveFlowFailures(0);
 
                   setVisibleStateOnly(
-                          "Ressincronizando: esperava " +
-                          previousExpected.name() +
-                          " / viu " + visualScene.name()
+                          "Ressincronizando: esperava "
+                          + previousExpected.name()
+                          + " / viu "
+                          + visualScene.name()
                   );
+
+                  // Não retorna.
+                  // A captura real continua decidindo
+                  // a próxima ação.
               } else {
-                  nextAllowedAnalysisMs = now + 300;
+                  nextAllowedAnalysisMs =
+                          now + 300;
+
                   return;
               }
           }
-          ''',
-          'ressincronização observacional')
+          '''
 
-          replace_once(
-          '''        if (combatContext && !attackBuffUsed
-                  && magicSpellSelected
-                  && attackTargetTapped
-                  && !detectMagicScreen(b)
-                  && !detectSpellTargetMode(b)) {
+          patch_regex(
+              pattern,
+              replacement,
+              "ressincronização visual"
+          )
 
-              // buff aguardando confirmação visual;
-              magicSpellSelected = false;
-              attackTargetTapped = false;
-              magicPhaseSinceMs = 0;
-              setState(EngineState.BATTLEFIELD, "Attack confirmado");
-              nextAllowedAnalysisMs = now + 500;
-          }
-          ''',
-          '''        if (combatContext && !attackBuffUsed
+          # -----------------------------------------------------
+          # 2. Corrige confirmação do buff
+          # -----------------------------------------------------
+
+          pattern = r'''
+          if\s*\(
+              combatContext\s*&&\s*!attackBuffUsed
+              \s*&&\s*magicSpellSelected
+              \s*&&\s*attackTargetTapped
+              \s*&&\s*!detectMagicScreen\(b\)
+              \s*&&\s*!detectSpellTargetMode\(b\)
+          \)\s*\{
+              .*?
+              setState
+              \(
+                  EngineState\.BATTLEFIELD,
+                  \s*"Attack confirmado"
+              \);
+              .*?
+          \}
+          '''
+
+          replacement = '''
+          if (combatContext
+                  && !attackBuffUsed
                   && magicSpellSelected
                   && attackTargetTapped
                   && !detectMagicScreen(b)
                   && !detectSpellTargetMode(b)) {
 
               attackBuffUsed = true;
+
               resetMagicScan();
+
               magicSpellSelected = false;
               attackTargetTapped = false;
               magicPhaseSinceMs = 0;
-              expectedVisualScene = VisualScene.UNKNOWN;
+
+              expectedVisualScene =
+                      VisualScene.UNKNOWN;
+
               flowFailureCount = 0;
-              saveFlowExpected(expectedVisualScene);
+
+              saveFlowExpected(
+                      expectedVisualScene
+              );
+
               saveFlowFailures(0);
+
               setState(
                       EngineState.BATTLEFIELD,
-                      "Buff Attack confirmado; iniciar ataques"
-              );
-              nextAllowedAnalysisMs = now + 700;
-              return;
-          }
-          ''',
-          'confirmação real do buff')
-
-          replace_once(
-          '''                expectFlowScene(
-                          VisualScene.BATTLEFIELD_AFTER_ACTION,
-                          now
-                  );
-          ''',
-          '''                expectedVisualScene = VisualScene.UNKNOWN;
-                  flowFailureCount = 0;
-                  saveFlowExpected(expectedVisualScene);
-                  saveFlowFailures(0);
-          ''',
-          'seleção de magia sem expectativa rígida')
-
-          replace_once(
-          '''        if (!combatContext
-                  && (visualScene == VisualScene.TARGET_MENU
-                      || detectTargetMenu(b))) {
-          ''',
-          '''        if (visualScene == VisualScene.TARGET_MENU
-                  || (!combatContext && detectTargetMenu(b))) {
-          ''',
-          'menu de alvo guiado pela tela')
-
-          replace_once(
-          '''        VisualScene routeScene = classifyVisualScene(b);
-          if (routeScene != VisualScene.MAP
-                  || lastVisualConfidence < 0.58) {
-
-              setRouteStep(
-                      "Rota aguardando MAP confiável; " +
-                      routeScene.name() + " " +
-                      String.format(
-                              java.util.Locale.US,
-                              "%.2f",
-                              lastVisualConfidence
-                      )
+                      "Buff Attack confirmado; "
+                      + "iniciar ataques"
               );
 
-              nextAllowedAnalysisMs = now + 550;
+              nextAllowedAnalysisMs =
+                      now + 700;
+
               return;
           }
-          ''',
-          '''        VisualScene routeScene = classifyVisualScene(b);
+          '''
 
-          boolean blockingUi = detectTargetMenu(b)
+          patch_regex(
+              pattern,
+              replacement,
+              "confirmação definitiva do buff"
+          )
+
+          # -----------------------------------------------------
+          # 3. Não exigir AFTER_ACTION depois de Selecionar
+          # -----------------------------------------------------
+
+          pattern = r'''
+          expectFlowScene
+          \(
+              \s*VisualScene\.BATTLEFIELD_AFTER_ACTION,
+              \s*now
+          \);
+          '''
+
+          replacement = '''
+          expectedVisualScene =
+                  VisualScene.UNKNOWN;
+
+          flowFailureCount = 0;
+
+          saveFlowExpected(
+                  expectedVisualScene
+          );
+
+          saveFlowFailures(0);
+          '''
+
+          patch_regex(
+              pattern,
+              replacement,
+              "retorno flexível após Selecionar"
+          )
+
+          # -----------------------------------------------------
+          # 4. Menu do Troll pode assumir o fluxo
+          # -----------------------------------------------------
+
+          pattern = r'''
+          if\s*\(
+              !combatContext
+              \s*&&\s*
+              \(
+                  visualScene\s*==\s*
+                  VisualScene\.TARGET_MENU
+                  \s*\|\|\s*
+                  detectTargetMenu\(b\)
+              \)
+          \)\s*\{
+          '''
+
+          replacement = '''
+          if (visualScene == VisualScene.TARGET_MENU
+                  || (!combatContext
+                      && detectTargetMenu(b))) {
+          '''
+
+          patch_regex(
+              pattern,
+              replacement,
+              "recuperação do menu do Troll"
+          )
+
+          # -----------------------------------------------------
+          # 5. Rota aceita UNKNOWN quando não existe UI bloqueante
+          # -----------------------------------------------------
+
+          pattern = r'''
+          VisualScene\s+routeScene\s*=
+              \s*classifyVisualScene\(b\);
+          \s*
+          if\s*\(
+              routeScene\s*!=\s*VisualScene\.MAP
+              \s*\|\|\s*
+              lastVisualConfidence\s*<\s*0\.58
+          \)\s*\{
+              .*?
+              return;
+          \s*\}
+          '''
+
+          replacement = '''
+          VisualScene routeScene =
+                  classifyVisualScene(b);
+
+          boolean blockingUi =
+                  detectTargetMenu(b)
                   || detectTurnMenu(b)
                   || detectMagicScreen(b)
                   || detectSpellTargetMode(b)
@@ -394,39 +511,147 @@ jobs:
 
           boolean mapAccepted =
                   routeScene == VisualScene.MAP
-                  || (routeScene == VisualScene.UNKNOWN && !blockingUi);
+                  || (
+                      routeScene == VisualScene.UNKNOWN
+                      && !blockingUi
+                  );
 
           if (!mapAccepted
-                  || (routeScene == VisualScene.MAP
-                      && lastVisualConfidence < 0.50)) {
+                  || (
+                      routeScene == VisualScene.MAP
+                      && lastVisualConfidence < 0.50
+                  )) {
 
               setRouteStep(
-                      "Rota aguardando mapa seguro; " +
-                      routeScene.name() + " " +
-                      String.format(
+                      "Rota aguardando mapa seguro; "
+                      + routeScene.name()
+                      + " "
+                      + String.format(
                               java.util.Locale.US,
                               "%.2f",
                               lastVisualConfidence
                       )
               );
 
-              nextAllowedAnalysisMs = now + 550;
+              nextAllowedAnalysisMs =
+                      now + 550;
+
               return;
           }
-          ''',
-          'rota com fallback seguro para UNKNOWN')
+          '''
 
-          replace_once(
-              '    private static final double TROLL_MATCH_MIN = 0.58;',
-              '    private static final double TROLL_MATCH_MIN = 0.52;',
-              'limiar Troll com confirmação pelo menu')
+          patch_regex(
+              pattern,
+              replacement,
+              "rota tolerante a UNKNOWN"
+          )
 
-          p.write_text(s, encoding='utf-8')
+          # -----------------------------------------------------
+          # 6. Ajusta sensibilidade da referência do Troll
+          # -----------------------------------------------------
+
+          new_s, count = re.subn(
+              r'''
+              (
+                  private\s+static\s+final\s+double
+                  \s+TROLL_MATCH_MIN\s*=\s*
+              )
+              0\.58
+              \s*;
+              ''',
+              r'\g<1>0.52;',
+              s,
+              count=1,
+              flags=re.X
+          )
+
+          if count == 1:
+              s = new_s
+              print(
+                  "PATCH OK: sensibilidade visual do Troll"
+              )
+          elif "TROLL_MATCH_MIN = 0.52" in s:
+              print(
+                  "PATCH OK: sensibilidade já estava em 0.52"
+              )
+          else:
+              raise SystemExit(
+                  "PATCH FALHOU: "
+                  "constante TROLL_MATCH_MIN não encontrada"
+              )
+
+          # -----------------------------------------------------
+          # Validações estruturais
+          # -----------------------------------------------------
+
+          checks = {
+              "ressincronização":
+                  "Ressincronizando: esperava" in s,
+
+              "buff definitivo":
+                  "attackBuffUsed = true;" in s,
+
+              "fluxo flexível":
+                  "retorno flexível" not in s
+                  and
+                  "VisualScene.BATTLEFIELD_AFTER_ACTION"
+                  in s,
+
+              "rota segura":
+                  "boolean mapAccepted" in s,
+
+              "blockingUi":
+                  "boolean blockingUi" in s,
+
+              "troll 0.52":
+                  "TROLL_MATCH_MIN = 0.52" in s,
+          }
+
+          for name, ok in checks.items():
+              print(
+                  f"CHECK {name}: "
+                  + ("PASS" if ok else "FAIL")
+              )
+
+              if not ok:
+                  raise SystemExit(
+                      f"VALIDAÇÃO FALHOU: {name}"
+                  )
+
+          path.write_text(
+              s,
+              encoding="utf-8"
+          )
 
           print(
-              'PATCH COMPLETO: motor visual reativo, buff e rota corrigidos'
+              "ATUALIZAÇÃO DO MOTOR CONCLUÍDA"
           )
           PY
+
+      - name: Validar Java modificado
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          FILE="app/src/main/java/com/oasisautoplay/OasisAccessibilityService.java"
+
+          grep -q \
+            "Ressincronizando: esperava" \
+            "${FILE}"
+
+          grep -q \
+            "boolean mapAccepted" \
+            "${FILE}"
+
+          grep -q \
+            "TROLL_MATCH_MIN = 0.52" \
+            "${FILE}"
+
+          grep -q \
+            "Buff Attack confirmado" \
+            "${FILE}"
+
+          echo "Validação estrutural concluída."
 
       - name: Compilar APK
         shell: bash
