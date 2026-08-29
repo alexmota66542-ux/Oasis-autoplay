@@ -1,0 +1,16 @@
+PASS - service_braces
+PASS - main_braces
+PASS - route_states
+PASS - circular_waypoints
+PASS - victory_starts_route
+PASS - empty_region_starts_route
+PASS - no_wait_same_spawn
+PASS - move_verification
+PASS - move_retry_limit
+PASS - troll_check_before_move
+PASS - route_persistence
+PASS - move_counter
+PASS - spawn_memory_preserved
+PASS - levelup_preserved
+PASS - combat_preserved
+PASS - workflow_untouched
