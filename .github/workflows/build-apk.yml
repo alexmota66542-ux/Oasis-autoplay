@@ -5,6 +5,9 @@ on:
   push:
     branches:
       - main
+    paths-ignore:
+      - 'README.md'
+      - '*.md'
 
 permissions:
   contents: read
@@ -43,11 +46,20 @@ jobs:
           mkdir -p app/src/main/res/values
           mkdir -p app/src/main/res/xml
 
-          cp MainActivity.java app/src/main/java/com/oasisautoplay/MainActivity.java
-          cp OasisAccessibilityService.java app/src/main/java/com/oasisautoplay/OasisAccessibilityService.java
-          cp AndroidManifest.xml app/src/main/AndroidManifest.xml
-          cp strings.xml app/src/main/res/values/strings.xml
-          cp accessibility_service_config.xml app/src/main/res/xml/accessibility_service_config.xml
+          cp MainActivity.java \
+            app/src/main/java/com/oasisautoplay/MainActivity.java
+
+          cp OasisAccessibilityService.java \
+            app/src/main/java/com/oasisautoplay/OasisAccessibilityService.java
+
+          cp AndroidManifest.xml \
+            app/src/main/AndroidManifest.xml
+
+          cp strings.xml \
+            app/src/main/res/values/strings.xml
+
+          cp accessibility_service_config.xml \
+            app/src/main/res/xml/accessibility_service_config.xml
 
           cat > settings.gradle <<'EOF'
           pluginManagement {
@@ -82,7 +94,7 @@ jobs:
           org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
           EOF
 
-          cat > app/build.gradle <<'EOF'
+          cat > app/build.gradle <<EOF
           plugins {
               id 'com.android.application'
           }
@@ -95,8 +107,9 @@ jobs:
                   applicationId "com.oasisautoplay"
                   minSdk 24
                   targetSdk 34
-                  versionCode 4
-                  versionName "0.3.1"
+
+                  versionCode ${GITHUB_RUN_NUMBER}
+                  versionName "build-${GITHUB_RUN_NUMBER}"
               }
 
               compileOptions {
@@ -111,10 +124,17 @@ jobs:
           EOF
 
       - name: Compilar APK
-        run: gradle assembleDebug --stacktrace
+        run: |
+          gradle assembleDebug --stacktrace
+
+      - name: Renomear APK
+        run: |
+          cp app/build/outputs/apk/debug/app-debug.apk \
+             "Oasis-Autoplay-build-${GITHUB_RUN_NUMBER}.apk"
 
       - name: Salvar APK
         uses: actions/upload-artifact@v4
         with:
-          name: Oasis-Autoplay-v0.3.1
-          path: app/build/outputs/apk/debug/app-debug.apk
+          name: Oasis-Autoplay-build-${{ github.run_number }}
+          path: Oasis-Autoplay-build-${{ github.run_number }}.apk
+          retention-days: 30
