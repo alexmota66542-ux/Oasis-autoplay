@@ -1,0 +1,10 @@
+PASS - workflow_root_png_scan
+PASS - workflow_no_required_assets_folder
+PASS - workflow_copies_root_pngs
+PASS - main_present
+PASS - service_present
+PASS - manifest_present
+PASS - config_present
+PASS - strings_present
+PASS - pngs_flattened
+PASS - no_assets_folder

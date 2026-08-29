@@ -39,6 +39,10 @@ public class MainActivity extends Activity {
     private TextView routeStatus;
     private TextView combatStepStatus;
     private TextView trollMatchStatus;
+    private TextView visualAiStatus;
+    private TextView flowStatus;
+    private TextView magicScanStatus;
+    private TextView huntRouteStatus;
     private TextView lastErrorStatus;
     private Button toggleButton;
 
@@ -99,6 +103,10 @@ public class MainActivity extends Activity {
         routeStatus = statusLine();
         combatStepStatus = statusLine();
         trollMatchStatus = statusLine();
+        visualAiStatus = statusLine();
+        flowStatus = statusLine();
+        magicScanStatus = statusLine();
+        huntRouteStatus = statusLine();
         lastErrorStatus = statusLine();
 
         root.addView(accessibilityStatus, matchWrap());
@@ -118,6 +126,10 @@ public class MainActivity extends Activity {
         root.addView(routeStatus, matchWrap());
         root.addView(combatStepStatus, matchWrap());
         root.addView(trollMatchStatus, matchWrap());
+        root.addView(visualAiStatus, matchWrap());
+        root.addView(flowStatus, matchWrap());
+        root.addView(magicScanStatus, matchWrap());
+        root.addView(huntRouteStatus, matchWrap());
         root.addView(lastErrorStatus, matchWrap());
 
         toggleButton = new Button(this);
@@ -354,6 +366,46 @@ public class MainActivity extends Activity {
                 "-"
         );
 
+        String visualScene = prefs.getString(
+                OasisAccessibilityService.PREF_VISUAL_SCENE,
+                "UNKNOWN"
+        );
+
+        String visualConfidence = prefs.getString(
+                OasisAccessibilityService.PREF_VISUAL_CONFIDENCE,
+                "0.000"
+        );
+
+        String flowExpected = prefs.getString(
+                OasisAccessibilityService.PREF_FLOW_EXPECTED,
+                "UNKNOWN"
+        );
+
+        int flowFailures = prefs.getInt(
+                OasisAccessibilityService.PREF_FLOW_FAILURES,
+                0
+        );
+
+        String magicScan = prefs.getString(
+                OasisAccessibilityService.PREF_MAGIC_SCAN,
+                ""
+        );
+
+        String magicOcr = prefs.getString(
+                OasisAccessibilityService.PREF_MAGIC_OCR,
+                ""
+        );
+
+        int huntZone = prefs.getInt(
+                OasisAccessibilityService.PREF_HUNT_ZONE,
+                0
+        );
+
+        int huntCycle = prefs.getInt(
+                OasisAccessibilityService.PREF_HUNT_CYCLE,
+                0
+        );
+
         String lastError = prefs.getString(
                 OasisAccessibilityService.PREF_LAST_ERROR,
                 ""
@@ -449,6 +501,33 @@ public class MainActivity extends Activity {
                 "Reconhecimento Troll: " +
                 (trollMatch == null ? "-" : trollMatch) +
                 "   mínimo=0.580"
+        );
+
+        visualAiStatus.setText(
+                "IA visual local: " +
+                (visualScene == null ? "UNKNOWN" : visualScene) +
+                "  confiança=" +
+                (visualConfidence == null ? "0.000" : visualConfidence)
+        );
+
+        flowStatus.setText(
+                "Fluxo esperado: " +
+                (flowExpected == null ? "UNKNOWN" : flowExpected) +
+                "  falhas=" + flowFailures
+        );
+
+        magicScanStatus.setText(
+                "Busca da magia: " +
+                (magicScan == null ? "" : magicScan) +
+                "\nOCR: " +
+                (magicOcr == null ? "" : magicOcr)
+        );
+
+        huntRouteStatus.setText(
+                "Rota 6 Trolls: zona " +
+                (huntZone + 1) +
+                "/6  ciclo=" +
+                huntCycle
         );
 
         lastErrorStatus.setText(

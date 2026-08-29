@@ -60,9 +60,18 @@ public class OasisAccessibilityService extends AccessibilityService {
     public static final String PREF_PATROL_MODE = "patrol_mode";
     public static final String PREF_ROUTE_INDEX = "route_index";
     public static final String PREF_ROUTE_STEP = "route_step";
+    public static final String PREF_HUNT_ZONE = "hunt_zone";
+    public static final String PREF_HUNT_CYCLE = "hunt_cycle";
+    public static final String PREF_HUNT_ZONE_COOLDOWNS = "hunt_zone_cooldowns";
     public static final String PREF_MOVE_COUNT = "move_count";
     public static final String PREF_COMBAT_STEP = "combat_step";
     public static final String PREF_TROLL_MATCH = "troll_match";
+    public static final String PREF_VISUAL_SCENE = "visual_scene";
+    public static final String PREF_VISUAL_CONFIDENCE = "visual_confidence";
+    public static final String PREF_FLOW_EXPECTED = "flow_expected";
+    public static final String PREF_FLOW_FAILURES = "flow_failures";
+    public static final String PREF_MAGIC_SCAN = "magic_scan";
+    public static final String PREF_MAGIC_OCR = "magic_ocr";
 
     private static final long ANALYSIS_INTERVAL_MS = 850;
     private static final long MAP_TAP_COOLDOWN_MS = 1100;
@@ -77,6 +86,27 @@ public class OasisAccessibilityService extends AccessibilityService {
     private static final long SPAWN_RECHECK_MS = 1800;
     private static final float SPAWN_RADIUS_NORM = 0.10f;
     private static final int MAX_SPAWN_MEMORY = 8;
+
+    // A área de caça fornecida pelo usuário contém 6 Trolls.
+    private static final int HUNT_ZONE_COUNT = 6;
+    private static final long HUNT_ZONE_MIN_RESPAWN_MS = 18000L;
+
+    // Posições lógicas no mapa completo de referência.
+    // NÃO são coordenadas de toque na tela do jogo.
+    private static final float[][] HUNT_ZONE_MAP_ANCHORS = new float[][]{
+            {0.412446f, 0.233487f},
+            {0.418234f, 0.412442f},
+            {0.447178f, 0.514593f},
+            {0.179450f, 0.578341f},
+            {0.371925f, 0.698925f},
+            {0.836469f, 0.600614f}
+    };
+
+    // Ciclo espacial baseado no mapa: topo -> centro -> floresta central
+    // -> esquerda inferior -> sul -> direita inferior -> topo.
+    private static final int[] HUNT_ROUTE_ORDER = new int[]{
+            0, 1, 2, 3, 4, 5
+    };
     private static final long MOVE_COOLDOWN_MS = 1400;
     private static final long MOVE_VERIFY_MS = 900;
     private static final int MAX_MOVE_RETRIES = 3;
@@ -105,6 +135,15 @@ public class OasisAccessibilityService extends AccessibilityService {
     private boolean magicSpellSelected = false;
     private boolean attackTargetTapped = false;
     private long magicPhaseSinceMs = 0;
+
+    // A posição da magia muda conforme novos drops entram na lista.
+    // Portanto, procuramos slot por slot e confirmamos pelo texto da descrição.
+    private final List<Float> magicSlotYs = new ArrayList<>();
+    private int magicScanIndex = 0;
+    private boolean magicCandidateTapped = false;
+    private boolean magicDescriptionOcrPending = false;
+    private long magicCandidateTappedMs = 0L;
+    private static final int MAGIC_MAX_SCAN_SLOTS = 14;
     private boolean openingSplashDone = false;
     private boolean waitingForScreenChange = false;
 
@@ -119,6 +158,12 @@ public class OasisAccessibilityService extends AccessibilityService {
     private float pendingTargetNormY = -1f;
     private long lastVictoryMs = 0;
 
+    // Planejador da rota de 6 Trolls.
+    private int currentHuntZone = 0;
+    private int huntCycle = 0;
+    private final long[] huntZoneLastDefeatedMs =
+            new long[HUNT_ZONE_COUNT];
+
     private int routeIndex = 0;
     private int routeStep = 0;
     private int moveRetries = 0;
@@ -127,14 +172,40 @@ public class OasisAccessibilityService extends AccessibilityService {
     private float lastMoveTapY = -1f;
     private double lastMoveSceneSignature = -1.0;
     private Bitmap trollReference = null;
+    private static final class SceneReference {
+        final VisualScene scene;
+        final Bitmap bitmap;
+        final String source;
+
+        SceneReference(
+                VisualScene scene,
+                Bitmap bitmap,
+                String source) {
+            this.scene = scene;
+            this.bitmap = bitmap;
+            this.source = source;
+        }
+    }
+
+    // Mini-IA visual local baseada em múltiplos exemplos reais.
+    // Não depende de internet nem de posição fixa do terreno.
+    private final List<SceneReference> sceneReferences =
+            new ArrayList<>();
+    private VisualScene lastVisualScene = VisualScene.UNKNOWN;
+    private double lastVisualConfidence = 0.0;
+    private VisualScene expectedVisualScene = VisualScene.UNKNOWN;
+    private int flowFailureCount = 0;
+    private long flowStepSinceMs = 0L;
+    private static final int FLOW_MAX_RETRIES = 3;
+    private static final long FLOW_STEP_WAIT_MS = 1000L;
 
     private final Map<Integer, StackTrack> tracks = new HashMap<>();
     private final List<BlacklistPoint> blacklist = new ArrayList<>();
 
-    // Rota circular conservadora baseada no vídeo de caça.
-    // Cada bloco representa uma pequena caminhada entre regiões de spawn.
-    // Os valores são coordenadas NORMALIZADAS da área jogável, não do mapa absoluto.
-    // Isso evita depender de uma posição mundial fixa.
+    // Rota circular conservadora baseada nos vídeos de caça.
+    // São 12 pequenos movimentos agrupados em 6 segmentos (2 por zona).
+    // O mapa completo serve apenas para TOPOLOGIA; os toques continuam
+    // normalizados na viewport e só são permitidos quando MAP é confirmado.
     private static final float[][] ROUTE_TAPS = new float[][]{
             {0.72f, 0.43f},
             {0.77f, 0.39f},
@@ -149,6 +220,17 @@ public class OasisAccessibilityService extends AccessibilityService {
             {0.57f, 0.59f},
             {0.67f, 0.54f}
     };
+
+    private enum VisualScene {
+        MAP,
+        TARGET_MENU,
+        BATTLEFIELD,
+        TURN_MENU,
+        MAGIC,
+        VICTORY,
+        BATTLEFIELD_AFTER_ACTION,
+        UNKNOWN
+    }
 
     private enum EngineState {
         SEARCH_MAP,
@@ -215,6 +297,7 @@ public class OasisAccessibilityService extends AccessibilityService {
         lastProgressMs = System.currentTimeMillis();
 
         loadTrollReference();
+        loadSceneReferences();
         loadSpawnMemory();
         routeIndex = getSharedPreferences(
                 PREFS,
@@ -225,7 +308,9 @@ public class OasisAccessibilityService extends AccessibilityService {
             routeIndex = 0;
         }
 
-        setPatrolMode("Rota circular ativa");
+        loadHuntZoneState();
+
+        setPatrolMode("Rota 6 zonas ativa; navegação ainda por passos relativos");
 
         setState(EngineState.SEARCH_MAP, "Procurando alvo");
 
@@ -366,6 +451,77 @@ public class OasisAccessibilityService extends AccessibilityService {
 
         cleanupBlacklist(now);
 
+        // IA visual básica: classifica a tela antes de qualquer clique.
+        VisualScene visualScene = classifyVisualScene(b);
+        saveVisualScene(visualScene, lastVisualConfidence);
+
+        // Deve existir antes do gate de fluxo estrito.
+        boolean combatContext = isCombatState(state);
+
+        // Fluxo de combate estrito: enquanto uma tela específica é esperada,
+        // nenhuma rotina paralela pode começar a clicar em outros controles.
+        if (combatContext
+                && expectedVisualScene != VisualScene.UNKNOWN
+                && !isCompatibleFlowScene(expectedVisualScene, visualScene)) {
+
+            long elapsed = now - flowStepSinceMs;
+
+            if (elapsed < FLOW_STEP_WAIT_MS) {
+                nextAllowedAnalysisMs = now + 250;
+                return;
+            }
+
+            flowFailureCount++;
+            saveFlowFailures(flowFailureCount);
+
+            if (flowFailureCount >= FLOW_MAX_RETRIES) {
+                setVisibleStateOnly(
+                        "Combate pausado: esperava " +
+                        expectedVisualScene.name() +
+                        " / viu " + visualScene.name()
+                );
+                nextAllowedAnalysisMs = now + 1000;
+                return;
+            }
+        }
+
+        // Vitória tem prioridade absoluta sobre outras decisões de combate.
+        if (visualScene == VisualScene.VICTORY) {
+            expectedVisualScene = VisualScene.UNKNOWN;
+            flowFailureCount = 0;
+            resetMagicScan();
+            saveFlowExpected(expectedVisualScene);
+            saveFlowFailures(0);
+
+            setState(
+                    EngineState.VICTORY,
+                    "Vitória reconhecida pela IA visual"
+            );
+
+            lastVictoryMs = now;
+            markLastConfirmedSpawnDefeated(now);
+            markCurrentHuntZoneDefeated(now);
+            resetBattleTracking();
+
+            // Confirmado nos vídeos: "Fechar" ocupa a metade esquerda inferior.
+            if (performAction(
+                    "FECHAR_VITORIA_VISUAL",
+                    0.25f * b.getWidth(),
+                    0.91f * b.getHeight(),
+                    VICTORY_COOLDOWN_MS
+            )) {
+                routeStep = 0;
+                moveRetries = 0;
+                movePhaseSinceMs = now;
+                setRouteStep("Saindo da vitória visual");
+                setState(
+                        EngineState.ROUTE_MOVE,
+                        "Vitória: seguindo para próximo spawn"
+                );
+            }
+            return;
+        }
+
         // Level-up tem prioridade absoluta sobre caça/combate.
         if (detectLevelUpScreen(b)) {
             handleLevelUp(b, now);
@@ -411,6 +567,7 @@ public class OasisAccessibilityService extends AccessibilityService {
             setState(EngineState.VICTORY, "Vitória detectada");
             lastVictoryMs = now;
             markLastConfirmedSpawnDefeated(now);
+            markCurrentHuntZoneDefeated(now);
             resetBattleTracking();
 
             if (performAction(
@@ -443,10 +600,13 @@ public class OasisAccessibilityService extends AccessibilityService {
             }
         }
 
-        boolean combatContext = isCombatState(state);
+        // Recalcula após telas globais que podem ter alterado o estado.
+        combatContext = isCombatState(state);
 
         // O menu de alvo só é válido durante busca/validação de alvo.
-        if (!combatContext && detectTargetMenu(b)) {
+        if (!combatContext
+                && (visualScene == VisualScene.TARGET_MENU
+                    || detectTargetMenu(b))) {
             setState(EngineState.TARGET_MENU, "Alvo confirmado");
             confirmPendingSpawn(b.getWidth(), b.getHeight());
 
@@ -465,7 +625,9 @@ public class OasisAccessibilityService extends AccessibilityService {
         // Fluxo rígido da única magia do combate:
         // menu de turno -> Usar magia -> Arma de Fogo -> Selecionar
         // -> tocar na própria tropa -> confirmar retorno ao campo.
-        if (combatContext && !attackBuffUsed && detectMagicScreen(b)) {
+        if (combatContext && !attackBuffUsed
+                && (visualScene == VisualScene.MAGIC
+                    || detectMagicScreen(b))) {
             setState(
                     EngineState.CAST_ATTACK_BUFF,
                     magicSpellSelected ? "Attack selecionado; aguardando campo"
@@ -522,7 +684,7 @@ public class OasisAccessibilityService extends AccessibilityService {
                 && !detectMagicScreen(b)
                 && !detectSpellTargetMode(b)) {
 
-            attackBuffUsed = true;
+            // buff aguardando confirmação visual;
             magicSpellSelected = false;
             attackTargetTapped = false;
             magicPhaseSinceMs = 0;
@@ -532,26 +694,88 @@ public class OasisAccessibilityService extends AccessibilityService {
 
         if (combatContext && !attackBuffUsed
                 && !magicSpellSelected
-                && detectTurnMenu(b)) {
+                && (visualScene == VisualScene.TURN_MENU
+                    || detectTurnMenu(b))) {
 
             setState(EngineState.TURN_MENU, "Abrindo Usar magia");
 
             // Passo 1: botão "Usar magia" no menu lateral direito.
             // Depois deste toque o motor NÃO tenta nenhuma outra ação
             // até uma nova captura confirmar a tela roxa de magias.
-            performAction(
+            if (performAction(
                     "1_ABRIR_USAR_MAGIA",
                     0.74f * b.getWidth(),
                     0.60f * b.getHeight(),
                     1000
+            )) {
+                resetMagicScan();
+                expectFlowScene(
+                        VisualScene.MAGIC,
+                        now
+                );
+            }
+            return;
+        }
+
+        // Se a batalha começou mas o menu lateral ainda está fechado,
+        // a primeira ação obrigatória é abrir "Ação".
+        // Sem isso o bot jamais chega ao botão "Usar magia".
+        if (combatContext
+                && !attackBuffUsed
+                && !magicSpellSelected
+                && visualScene == VisualScene.BATTLEFIELD) {
+
+            setVisibleStateOnly(
+                    "Batalha reconhecida; abrindo menu Ação"
             );
+
+            if (performAction(
+                    "0_ABRIR_MENU_ACAO",
+                    0.25f * b.getWidth(),
+                    0.91f * b.getHeight(),
+                    1000
+            )) {
+                expectFlowScene(
+                        VisualScene.TURN_MENU,
+                        now
+                );
+            }
+            return;
+        }
+
+        // O clique na tropa NÃO confirma o buff.
+        // Ele só é aceito quando a captura seguinte volta ao campo,
+        // fora do modo de seleção da magia.
+        if (state == EngineState.APPLY_ATTACK_TARGET
+                && magicSpellSelected
+                && !detectSpellTargetMode(b)
+                && (visualScene == VisualScene.BATTLEFIELD
+                    || visualScene == VisualScene.BATTLEFIELD_AFTER_ACTION)) {
+
+            attackBuffUsed = true;
+            resetMagicScan();
+            magicSpellSelected = false;
+            expectedVisualScene = VisualScene.UNKNOWN;
+            flowFailureCount = 0;
+            saveFlowExpected(expectedVisualScene);
+            saveFlowFailures(0);
+
+            setState(
+                    EngineState.BATTLEFIELD,
+                    "Buff confirmado; iniciar ataques"
+            );
+            nextAllowedAnalysisMs = now + 1000;
             return;
         }
 
         // Detecta tropas. >=4 também serve para recuperar caso o serviço
         // seja ativado já dentro de uma batalha.
         List<StackCandidate> stacks = findStackCandidates(b);
-        boolean strongBattlefield = stacks.size() >= 4;
+        boolean strongBattlefield =
+                stacks.size() >= 4
+                || visualScene == VisualScene.BATTLEFIELD
+                || visualScene == VisualScene.TURN_MENU
+                || visualScene == VisualScene.MAGIC;
 
         if (combatContext || strongBattlefield) {
             if (stacks.size() >= 2) {
@@ -604,7 +828,10 @@ public class OasisAccessibilityService extends AccessibilityService {
 
             // A navegação nunca pode assumir controle se ainda houver
             // qualquer evidência de combate/menu/magia.
-            if (detectTurnMenu(b)
+            if (visualScene == VisualScene.BATTLEFIELD
+                    || visualScene == VisualScene.TURN_MENU
+                    || visualScene == VisualScene.MAGIC
+                    || detectTurnMenu(b)
                     || detectMagicScreen(b)
                     || detectSpellTargetMode(b)) {
                 setState(EngineState.ENTERING_COMBAT,
@@ -872,38 +1099,414 @@ public class OasisAccessibilityService extends AccessibilityService {
         final int w = b.getWidth();
         final int h = b.getHeight();
 
-        // Passo 2: selecionar SOMENTE Arma de Fogo.
-        // Um único clique por ciclo; confirmação vem na captura seguinte.
-        if (!magicSpellSelected) {
+        // A magia de ataque pode mudar de posição após novos drops.
+        // Nunca usamos um slot fixo. Descobrimos os slots preenchidos,
+        // selecionamos um por vez e confirmamos pela descrição via OCR.
+        if (magicSpellSelected) {
             if (performAction(
-                    "2_SELECIONAR_ARMA_DE_FOGO",
-                    0.085f * w,
-                    0.275f * h,
+                    "3_CONFIRMAR_SELECIONAR",
+                    0.25f * w,
+                    0.88f * h,
                     1000)) {
 
-                magicSpellSelected = true;
                 magicPhaseSinceMs = now;
-                setVisibleStateOnly(
-                        "Magia: Arma de Fogo selecionada; aguardando Selecionar"
+                expectFlowScene(
+                        VisualScene.BATTLEFIELD_AFTER_ACTION,
+                        now
+                );
+                setState(
+                        EngineState.APPLY_ATTACK_TARGET,
+                        "Magia de ataque confirmada; aguardando alvo"
                 );
             }
             return;
         }
 
-        // Passo 3: botão Selecionar.
-        // Não toca novamente no ícone da magia.
-        if (performAction(
-                "3_CONFIRMAR_SELECIONAR",
-                0.25f * w,
-                0.88f * h,
-                1000)) {
+        if (magicSlotYs.isEmpty()) {
+            magicSlotYs.addAll(findFilledMagicSlots(b));
+            magicScanIndex = 0;
+            magicCandidateTapped = false;
+            magicDescriptionOcrPending = false;
 
-            magicPhaseSinceMs = now;
-            setState(
-                    EngineState.APPLY_ATTACK_TARGET,
-                    "Magia: aguardando alvo na própria tropa"
+            saveMagicScan(
+                    "slots=" + magicSlotYs.size() +
+                    " procurando efeito de Attack"
+            );
+
+            if (magicSlotYs.isEmpty()) {
+                setLastError(
+                        "Magia: nenhum slot preenchido reconhecido"
+                );
+                nextAllowedAnalysisMs = now + 1000;
+                return;
+            }
+        }
+
+        if (magicScanIndex >= magicSlotYs.size()
+                || magicScanIndex >= MAGIC_MAX_SCAN_SLOTS) {
+
+            setLastError(
+                    "Magia de ataque não encontrada na lista atual"
+            );
+            saveMagicScan("não encontrada");
+            expectedVisualScene = VisualScene.UNKNOWN;
+            saveFlowExpected(expectedVisualScene);
+            nextAllowedAnalysisMs = now + 1200;
+            return;
+        }
+
+        // Primeiro toque: seleciona o candidato atual.
+        if (!magicCandidateTapped) {
+            float yNorm = magicSlotYs.get(magicScanIndex);
+
+            if (performAction(
+                    "2_TESTAR_MAGIA_SLOT_" + (magicScanIndex + 1),
+                    0.085f * w,
+                    yNorm * h,
+                    1000)) {
+
+                magicCandidateTapped = true;
+                magicDescriptionOcrPending = false;
+                magicCandidateTappedMs = now;
+
+                saveMagicScan(
+                        "testando slot " + (magicScanIndex + 1) +
+                        "/" + magicSlotYs.size()
+                );
+            }
+            return;
+        }
+
+        // Dá tempo para o painel de descrição atualizar antes do OCR.
+        if (now - magicCandidateTappedMs < 700) {
+            nextAllowedAnalysisMs = now + 250;
+            return;
+        }
+
+        if (!magicDescriptionOcrPending && !ocrBusy) {
+            magicDescriptionOcrPending = true;
+            readSelectedMagicDescription(
+                    b,
+                    magicScanIndex
             );
         }
+
+        nextAllowedAnalysisMs = now + 300;
+    }
+
+    private List<Float> findFilledMagicSlots(Bitmap b) {
+        List<Float> result = new ArrayList<>();
+
+        int w = b.getWidth();
+        int h = b.getHeight();
+
+        // Coluna observada da lista de magias.
+        int x0 = (int)(0.030f * w);
+        int x1 = (int)(0.145f * w);
+
+        // Centros dos slots são regulares, mas a magia desejada não.
+        float first = 0.178f;
+        float spacing = 0.0475f;
+
+        for (int i = 0; i < MAGIC_MAX_SCAN_SLOTS; i++) {
+            float cy = first + i * spacing;
+            if (cy > 0.80f) break;
+
+            int y0 = (int)((cy - 0.020f) * h);
+            int y1 = (int)((cy + 0.020f) * h);
+
+            double purple = localRatio(
+                    b, x0, y0, x1, y1,
+                    4, LocalKind.PURPLE
+            );
+
+            double dark = localRatio(
+                    b, x0, y0, x1, y1,
+                    4, LocalKind.DARK
+            );
+
+            double bright = localBrightRatio(
+                    b, x0, y0, x1, y1, 4
+            );
+
+            // Slot vazio = quase todo roxo/escuro.
+            // Ícone real tem cores claras, vermelhas, amarelas, verdes etc.
+            if (bright > 0.055
+                    || (purple < 0.72 && dark < 0.80)) {
+                result.add(cy);
+            }
+        }
+
+        return result;
+    }
+
+    private double localBrightRatio(
+            Bitmap b,
+            int x0, int y0,
+            int x1, int y1,
+            int step) {
+
+        x0 = Math.max(0, x0);
+        y0 = Math.max(0, y0);
+        x1 = Math.min(b.getWidth(), x1);
+        y1 = Math.min(b.getHeight(), y1);
+
+        int total = 0;
+        int bright = 0;
+
+        for (int y = y0; y < y1; y += Math.max(1, step)) {
+            for (int x = x0; x < x1; x += Math.max(1, step)) {
+                int c = b.getPixel(x, y);
+                int r = Color.red(c);
+                int g = Color.green(c);
+                int bl = Color.blue(c);
+
+                int lum = (r * 3 + g * 5 + bl * 2) / 10;
+                if (lum > 115
+                        || r > 150
+                        || g > 150
+                        || bl > 165) {
+                    bright++;
+                }
+                total++;
+            }
+        }
+
+        return total <= 0 ? 0.0 : (double)bright / total;
+    }
+
+    private void readSelectedMagicDescription(
+            Bitmap screen,
+            final int testedIndex) {
+
+        if (ocrBusy || destroyed) {
+            magicDescriptionOcrPending = false;
+            return;
+        }
+
+        final int sw = screen.getWidth();
+        final int sh = screen.getHeight();
+
+        // Apenas a área textual da magia selecionada; não OCR da lista inteira.
+        int x = Math.max(0, (int)(0.145f * sw));
+        int y = Math.max(0, (int)(0.135f * sh));
+        int cw = Math.min(sw - x, (int)(0.82f * sw));
+        int ch = Math.min(sh - y, (int)(0.19f * sh));
+
+        if (cw <= 10 || ch <= 10) {
+            magicDescriptionOcrPending = false;
+            advanceMagicCandidate(
+                    testedIndex,
+                    "crop inválido"
+            );
+            return;
+        }
+
+        final Bitmap crop;
+        try {
+            crop = Bitmap.createBitmap(
+                    screen, x, y, cw, ch
+            );
+        } catch (Throwable t) {
+            magicDescriptionOcrPending = false;
+            advanceMagicCandidate(
+                    testedIndex,
+                    "falha no crop"
+            );
+            return;
+        }
+
+        ocrBusy = true;
+
+        try {
+            if (recognizer == null) {
+                recognizer =
+                        TextRecognition.getClient(
+                                TextRecognizerOptions.DEFAULT_OPTIONS
+                        );
+            }
+
+            recognizer.process(
+                    InputImage.fromBitmap(crop, 0)
+            )
+            .addOnSuccessListener(text -> {
+                String raw = text == null
+                        ? ""
+                        : text.getText();
+
+                String normalized =
+                        normalizeMagicOcr(raw);
+
+                saveMagicOcr(normalized);
+
+                if (isAttackBuffDescription(normalized)) {
+                    magicSpellSelected = true;
+                    magicCandidateTapped = false;
+                    magicDescriptionOcrPending = false;
+                    flowFailureCount = 0;
+
+                    setVisibleStateOnly(
+                            "Magia de ataque encontrada no slot " +
+                            (testedIndex + 1)
+                    );
+
+                    saveMagicScan(
+                            "Attack encontrado no slot " +
+                            (testedIndex + 1)
+                    );
+
+                    // Próxima captura apertará "Selecionar".
+                    nextAllowedAnalysisMs =
+                            System.currentTimeMillis() + 900;
+                } else {
+                    advanceMagicCandidate(
+                            testedIndex,
+                            "efeito não é Attack"
+                    );
+                }
+            })
+            .addOnFailureListener(e -> {
+                saveMagicOcr(
+                        "falha OCR: " + shortError(e)
+                );
+                advanceMagicCandidate(
+                        testedIndex,
+                        "OCR falhou"
+                );
+            })
+            .addOnCompleteListener(task -> {
+                try {
+                    if (!crop.isRecycled()) {
+                        crop.recycle();
+                    }
+                } catch (Throwable ignored) {}
+
+                ocrBusy = false;
+                magicDescriptionOcrPending = false;
+            });
+
+        } catch (Throwable t) {
+            try {
+                if (!crop.isRecycled()) crop.recycle();
+            } catch (Throwable ignored) {}
+
+            ocrBusy = false;
+            magicDescriptionOcrPending = false;
+            saveMagicOcr(
+                    "erro OCR: " + shortError(t)
+            );
+            advanceMagicCandidate(
+                    testedIndex,
+                    "OCR indisponível"
+            );
+        }
+    }
+
+    private void advanceMagicCandidate(
+            int testedIndex,
+            String reason) {
+
+        // Ignora callback antigo se o estado já avançou.
+        if (magicSpellSelected
+                || testedIndex != magicScanIndex) {
+            return;
+        }
+
+        magicScanIndex++;
+        magicCandidateTapped = false;
+        magicDescriptionOcrPending = false;
+        magicCandidateTappedMs = 0L;
+
+        saveMagicScan(
+                reason + "; próximo slot=" +
+                (magicScanIndex + 1)
+        );
+
+        nextAllowedAnalysisMs =
+                System.currentTimeMillis() + 850;
+    }
+
+    private String normalizeMagicOcr(String s) {
+        if (s == null) return "";
+
+        String v = s.toLowerCase(
+                java.util.Locale.ROOT
+        );
+
+        v = java.text.Normalizer.normalize(
+                v,
+                java.text.Normalizer.Form.NFD
+        );
+
+        return v.replaceAll(
+                "\\p{M}+",
+                ""
+        ).replaceAll(
+                "\\s+",
+                " "
+        ).trim();
+    }
+
+    private boolean isAttackBuffDescription(
+            String normalized) {
+
+        if (normalized == null
+                || normalized.isEmpty()) {
+            return false;
+        }
+
+        // Aceita nomes diferentes e ordem variável dos drops.
+        // A confirmação é pelo EFEITO, não pelo nome ou posição.
+        boolean hasAttack =
+                normalized.contains("ataque")
+                || normalized.contains("attack");
+
+        boolean hasIncrease =
+                normalized.contains("aument")
+                || normalized.contains("forca")
+                || normalized.contains("força")
+                || normalized.contains("super forca")
+                || normalized.contains("bonus");
+
+        boolean hasUnitContext =
+                normalized.contains("unidade")
+                || normalized.contains("exercito")
+                || normalized.contains("tropa")
+                || normalized.contains("selecionad");
+
+        // Frase observada: "Aumenta o ataque de uma unidade selecionada..."
+        return hasAttack
+                && (hasIncrease || hasUnitContext);
+    }
+
+    private void resetMagicScan() {
+        magicSlotYs.clear();
+        magicScanIndex = 0;
+        magicCandidateTapped = false;
+        magicDescriptionOcrPending = false;
+        magicCandidateTappedMs = 0L;
+        saveMagicScan("reset");
+        saveMagicOcr("");
+    }
+
+    private void saveMagicScan(String value) {
+        getSharedPreferences(PREFS, MODE_PRIVATE)
+                .edit()
+                .putString(
+                        PREF_MAGIC_SCAN,
+                        value == null ? "" : value
+                )
+                .apply();
+    }
+
+    private void saveMagicOcr(String value) {
+        getSharedPreferences(PREFS, MODE_PRIVATE)
+                .edit()
+                .putString(
+                        PREF_MAGIC_OCR,
+                        value == null ? "" : value
+                )
+                .apply();
     }
 
     private void searchMapAndTapCandidate(Bitmap b) {
@@ -1093,6 +1696,39 @@ public class OasisAccessibilityService extends AccessibilityService {
     }
 
     private void handleRouteMovement(Bitmap b, long now) {
+        // Segurança da nova rota: só movimenta quando a IA confirma MAP.
+        // Terreno, batalha, menu, magia ou estado ambíguo => nenhum toque de rota.
+        VisualScene routeScene = classifyVisualScene(b);
+        if (routeScene != VisualScene.MAP
+                || lastVisualConfidence < 0.58) {
+
+            setRouteStep(
+                    "Rota aguardando MAP confiável; " +
+                    routeScene.name() + " " +
+                    String.format(
+                            java.util.Locale.US,
+                            "%.2f",
+                            lastVisualConfidence
+                    )
+            );
+
+            nextAllowedAnalysisMs = now + 550;
+            return;
+        }
+
+        // Mantém o índice físico alinhado com a zona lógica atual.
+        int desiredSegmentStart =
+                (currentHuntZone % HUNT_ZONE_COUNT) * 2;
+
+        if (routeIndex < desiredSegmentStart
+                || routeIndex > desiredSegmentStart + 1) {
+            routeIndex = desiredSegmentStart;
+            getSharedPreferences(PREFS, MODE_PRIVATE)
+                    .edit()
+                    .putInt(PREF_ROUTE_INDEX, routeIndex)
+                    .apply();
+        }
+
         int w = b.getWidth();
         int h = b.getHeight();
 
@@ -1225,14 +1861,182 @@ public class OasisAccessibilityService extends AccessibilityService {
     private void advanceRouteIndex() {
         routeIndex++;
 
-        if (routeIndex >= ROUTE_TAPS.length) {
-            routeIndex = 0;
+        int segmentEnd =
+                (currentHuntZone % HUNT_ZONE_COUNT) * 2 + 1;
+
+        if (routeIndex > segmentEnd
+                || routeIndex >= ROUTE_TAPS.length) {
+
+            selectNextReadyHuntZone(
+                    System.currentTimeMillis()
+            );
+
+            routeIndex =
+                    (currentHuntZone % HUNT_ZONE_COUNT) * 2;
         }
 
         getSharedPreferences(PREFS, MODE_PRIVATE)
                 .edit()
                 .putInt(PREF_ROUTE_INDEX, routeIndex)
+                .putInt(PREF_HUNT_ZONE, currentHuntZone)
+                .putInt(PREF_HUNT_CYCLE, huntCycle)
                 .apply();
+    }
+
+    private void selectNextReadyHuntZone(long now) {
+        int currentPos = 0;
+
+        for (int i = 0; i < HUNT_ROUTE_ORDER.length; i++) {
+            if (HUNT_ROUTE_ORDER[i] == currentHuntZone) {
+                currentPos = i;
+                break;
+            }
+        }
+
+        int fallback = HUNT_ROUTE_ORDER[
+                (currentPos + 1) % HUNT_ROUTE_ORDER.length
+        ];
+
+        for (int step = 1;
+             step <= HUNT_ROUTE_ORDER.length;
+             step++) {
+
+            int pos =
+                    (currentPos + step)
+                    % HUNT_ROUTE_ORDER.length;
+
+            int candidate =
+                    HUNT_ROUTE_ORDER[pos];
+
+            long defeated =
+                    huntZoneLastDefeatedMs[candidate];
+
+            boolean ready =
+                    defeated <= 0L
+                    || now - defeated
+                    >= HUNT_ZONE_MIN_RESPAWN_MS;
+
+            if (ready) {
+                if (pos <= currentPos) {
+                    huntCycle++;
+                }
+
+                currentHuntZone = candidate;
+                saveHuntZoneState();
+
+                setPatrolMode(
+                        "Rota 6 Trolls: zona " +
+                        (currentHuntZone + 1) +
+                        "/6"
+                );
+                return;
+            }
+        }
+
+        // Se todos ainda estiverem em cooldown, continua circulando;
+        // nunca para esperando exclusivamente um único spawn.
+        currentHuntZone = fallback;
+        if (currentHuntZone == HUNT_ROUTE_ORDER[0]) {
+            huntCycle++;
+        }
+
+        saveHuntZoneState();
+
+        setPatrolMode(
+                "6 zonas em cooldown; circulando para zona " +
+                (currentHuntZone + 1)
+        );
+    }
+
+    private void markCurrentHuntZoneDefeated(long now) {
+        if (currentHuntZone < 0
+                || currentHuntZone >= HUNT_ZONE_COUNT) {
+            return;
+        }
+
+        huntZoneLastDefeatedMs[currentHuntZone] = now;
+
+        setPatrolMode(
+                "Troll da zona " +
+                (currentHuntZone + 1) +
+                "/6 eliminado"
+        );
+
+        selectNextReadyHuntZone(now);
+
+        routeIndex =
+                (currentHuntZone % HUNT_ZONE_COUNT) * 2;
+
+        saveHuntZoneState();
+    }
+
+    private void saveHuntZoneState() {
+        StringBuilder sb = new StringBuilder();
+
+        for (int i = 0;
+             i < huntZoneLastDefeatedMs.length;
+             i++) {
+
+            if (i > 0) sb.append(",");
+            sb.append(huntZoneLastDefeatedMs[i]);
+        }
+
+        getSharedPreferences(PREFS, MODE_PRIVATE)
+                .edit()
+                .putInt(PREF_HUNT_ZONE, currentHuntZone)
+                .putInt(PREF_HUNT_CYCLE, huntCycle)
+                .putString(
+                        PREF_HUNT_ZONE_COOLDOWNS,
+                        sb.toString()
+                )
+                .apply();
+    }
+
+    private void loadHuntZoneState() {
+        android.content.SharedPreferences p =
+                getSharedPreferences(PREFS, MODE_PRIVATE);
+
+        currentHuntZone = p.getInt(
+                PREF_HUNT_ZONE,
+                0
+        );
+
+        huntCycle = p.getInt(
+                PREF_HUNT_CYCLE,
+                0
+        );
+
+        if (currentHuntZone < 0
+                || currentHuntZone >= HUNT_ZONE_COUNT) {
+            currentHuntZone = 0;
+        }
+
+        String raw = p.getString(
+                PREF_HUNT_ZONE_COOLDOWNS,
+                ""
+        );
+
+        if (raw == null || raw.trim().isEmpty()) {
+            return;
+        }
+
+        try {
+            String[] values = raw.split(",");
+
+            for (int i = 0;
+                 i < values.length
+                 && i < HUNT_ZONE_COUNT;
+                 i++) {
+
+                huntZoneLastDefeatedMs[i] =
+                        Long.parseLong(values[i]);
+            }
+        } catch (Throwable ignored) {
+            java.util.Arrays.fill(
+                    huntZoneLastDefeatedMs,
+                    0L
+            );
+        }
     }
 
     private double sceneSignature(Bitmap b) {
@@ -1336,6 +2140,431 @@ public class OasisAccessibilityService extends AccessibilityService {
         }
 
         return best;
+    }
+
+    private boolean isCompatibleFlowScene(
+            VisualScene expected,
+            VisualScene actual) {
+
+        if (expected == VisualScene.UNKNOWN || expected == actual) {
+            return true;
+        }
+
+        if (expected == VisualScene.BATTLEFIELD_AFTER_ACTION
+                && actual == VisualScene.BATTLEFIELD) {
+            return true;
+        }
+
+        if (expected == VisualScene.BATTLEFIELD
+                && actual == VisualScene.BATTLEFIELD_AFTER_ACTION) {
+            return true;
+        }
+
+        return false;
+    }
+
+    private void expectFlowScene(
+            VisualScene scene,
+            long now) {
+
+        expectedVisualScene = scene;
+        flowFailureCount = 0;
+        flowStepSinceMs = now;
+        saveFlowExpected(scene);
+        saveFlowFailures(0);
+    }
+
+    private void saveFlowExpected(VisualScene scene) {
+        getSharedPreferences(PREFS, MODE_PRIVATE)
+                .edit()
+                .putString(
+                        PREF_FLOW_EXPECTED,
+                        scene == null ? "UNKNOWN" : scene.name()
+                )
+                .apply();
+    }
+
+    private void saveFlowFailures(int count) {
+        getSharedPreferences(PREFS, MODE_PRIVATE)
+                .edit()
+                .putInt(PREF_FLOW_FAILURES, count)
+                .apply();
+    }
+
+    private void loadSceneReferences() {
+        sceneReferences.clear();
+
+        // Dataset principal: vários exemplos por classe, extraídos
+        // de batalhas reais gravadas pelo usuário.
+        loadSceneReference(VisualScene.MAP, "scene_map_9715_a.png");
+        loadSceneReference(VisualScene.MAP, "scene_map_9715_b.png");
+        loadSceneReference(VisualScene.MAP, "scene_map_9682_a.png");
+
+        loadSceneReference(
+                VisualScene.BATTLEFIELD,
+                "scene_battlefield_9715_a.png"
+        );
+        loadSceneReference(
+                VisualScene.BATTLEFIELD,
+                "scene_battlefield_9715_b.png"
+        );
+        loadSceneReference(
+                VisualScene.BATTLEFIELD,
+                "scene_battlefield_9682_a.png"
+        );
+
+        loadSceneReference(
+                VisualScene.TURN_MENU,
+                "scene_turn_menu_9715_a.png"
+        );
+        loadSceneReference(
+                VisualScene.TURN_MENU,
+                "scene_turn_menu_9682_a.png"
+        );
+
+        loadSceneReference(
+                VisualScene.MAGIC,
+                "scene_magic_9682_a.png"
+        );
+
+        loadSceneReference(
+                VisualScene.VICTORY,
+                "scene_victory_9715_a.png"
+        );
+        loadSceneReference(
+                VisualScene.VICTORY,
+                "scene_victory_9715_b.png"
+        );
+        loadSceneReference(
+                VisualScene.VICTORY,
+                "scene_victory_9682_a.png"
+        );
+
+        loadSceneReference(
+                VisualScene.BATTLEFIELD_AFTER_ACTION,
+                "scene_battlefield_after_action_9682_a.png"
+        );
+
+        // Mantém as referências antigas como exemplos adicionais.
+        loadSceneReference(VisualScene.MAP, "scene_map.png");
+        loadSceneReference(
+                VisualScene.TARGET_MENU,
+                "scene_target_menu.png"
+        );
+        loadSceneReference(
+                VisualScene.BATTLEFIELD,
+                "scene_battlefield.png"
+        );
+        loadSceneReference(
+                VisualScene.TURN_MENU,
+                "scene_turn_menu.png"
+        );
+        loadSceneReference(
+                VisualScene.MAGIC,
+                "scene_magic.png"
+        );
+        loadSceneReference(
+                VisualScene.VICTORY,
+                "scene_victory.png"
+        );
+        loadSceneReference(
+                VisualScene.BATTLEFIELD_AFTER_ACTION,
+                "scene_battlefield_after_action.png"
+        );
+    }
+
+    private void loadSceneReference(
+            VisualScene scene,
+            String assetName) {
+
+        try {
+            Bitmap ref = android.graphics.BitmapFactory.decodeStream(
+                    getAssets().open(assetName)
+            );
+
+            if (ref != null) {
+                sceneReferences.add(
+                        new SceneReference(
+                                scene,
+                                ref,
+                                assetName
+                        )
+                );
+            }
+        } catch (Throwable t) {
+            // Alguns assets adicionais são opcionais em builds antigos.
+            // A IA continua funcionando com os exemplos disponíveis.
+        }
+    }
+
+    private VisualScene classifyVisualScene(Bitmap screen) {
+        if (sceneReferences.isEmpty()) {
+            lastVisualConfidence = 0.0;
+            return VisualScene.UNKNOWN;
+        }
+
+        java.util.EnumMap<VisualScene, List<Double>> perClass =
+                new java.util.EnumMap<>(VisualScene.class);
+
+        for (SceneReference ref : sceneReferences) {
+            if (ref == null
+                    || ref.bitmap == null
+                    || ref.bitmap.isRecycled()) {
+                continue;
+            }
+
+            double score = sceneSimilarity(
+                    screen,
+                    ref.bitmap
+            );
+
+            List<Double> values = perClass.get(ref.scene);
+            if (values == null) {
+                values = new ArrayList<>();
+                perClass.put(ref.scene, values);
+            }
+            values.add(score);
+        }
+
+        VisualScene bestScene = VisualScene.UNKNOWN;
+        double bestClassScore = -1.0;
+        double secondClassScore = -1.0;
+
+        for (java.util.Map.Entry<VisualScene, List<Double>> e :
+                perClass.entrySet()) {
+
+            List<Double> scores = e.getValue();
+            if (scores == null || scores.isEmpty()) {
+                continue;
+            }
+
+            java.util.Collections.sort(
+                    scores,
+                    java.util.Collections.reverseOrder()
+            );
+
+            // k-NN/prototype ensemble:
+            // melhor exemplo pesa mais, segundo melhor estabiliza
+            // contra variações de terreno, drops e animações.
+            double s1 = scores.get(0);
+            double s2 = scores.size() > 1
+                    ? scores.get(1)
+                    : s1;
+
+            double classScore =
+                    s1 * 0.68 +
+                    s2 * 0.32;
+
+            if (classScore > bestClassScore) {
+                secondClassScore = bestClassScore;
+                bestClassScore = classScore;
+                bestScene = e.getKey();
+            } else if (classScore > secondClassScore) {
+                secondClassScore = classScore;
+            }
+        }
+
+        double margin =
+                bestClassScore -
+                Math.max(0.0, secondClassScore);
+
+        double confidence =
+                Math.max(
+                        0.0,
+                        Math.min(
+                                1.0,
+                                bestClassScore * 0.80
+                                + margin * 0.75
+                        )
+                );
+
+        lastVisualConfidence = confidence;
+
+        // Em dúvida, não clica.
+        if (bestClassScore < 0.52
+                || confidence < 0.47
+                || margin < 0.014) {
+            return VisualScene.UNKNOWN;
+        }
+
+        return bestScene;
+    }
+
+    private double sceneSimilarity(
+            Bitmap screen,
+            Bitmap ref) {
+
+        int rw = ref.getWidth();
+        int rh = ref.getHeight();
+
+        double weightedColor = 0.0;
+        double weightedEdge = 0.0;
+        double weightSum = 0.0;
+
+        // A IA aprende a interface, não apenas o terreno:
+        // topo + rodapé + lado direito têm peso maior.
+        for (int gy = 1; gy < 24; gy++) {
+            for (int gx = 1; gx < 14; gx++) {
+
+                float nx = gx / 14.0f;
+                float ny = gy / 24.0f;
+
+                int x = Math.min(
+                        screen.getWidth() - 1,
+                        Math.max(
+                                0,
+                                (int)(nx * screen.getWidth())
+                        )
+                );
+
+                int y = Math.min(
+                        screen.getHeight() - 1,
+                        Math.max(
+                                0,
+                                (int)(ny * screen.getHeight())
+                        )
+                );
+
+                int rx = Math.min(
+                        rw - 1,
+                        Math.max(0, (int)(nx * rw))
+                );
+
+                int ry = Math.min(
+                        rh - 1,
+                        Math.max(0, (int)(ny * rh))
+                );
+
+                double weight = 1.0;
+
+                // Barra superior/status do combate.
+                if (ny < 0.12f) {
+                    weight = 2.2;
+                }
+
+                // Controles inferiores Ação/Menu/Selecionar/Fechar.
+                if (ny > 0.82f) {
+                    weight = 2.8;
+                }
+
+                // Menu lateral direito.
+                if (nx > 0.50f && ny > 0.24f) {
+                    weight = Math.max(weight, 2.4);
+                }
+
+                // Centro do terreno recebe menos peso.
+                if (nx > 0.18f
+                        && nx < 0.78f
+                        && ny > 0.18f
+                        && ny < 0.75f) {
+                    weight *= 0.72;
+                }
+
+                int a = screen.getPixel(x, y);
+                int b = ref.getPixel(rx, ry);
+
+                int ar = Color.red(a);
+                int ag = Color.green(a);
+                int ab = Color.blue(a);
+
+                int br = Color.red(b);
+                int bg = Color.green(b);
+                int bb = Color.blue(b);
+
+                double diff =
+                        Math.abs(ar - br)
+                        + Math.abs(ag - bg)
+                        + Math.abs(ab - bb);
+
+                double color =
+                        1.0 - Math.min(
+                                1.0,
+                                diff / 500.0
+                        );
+
+                int x2 = Math.min(
+                        screen.getWidth() - 1,
+                        x + Math.max(
+                                1,
+                                screen.getWidth()/120
+                        )
+                );
+
+                int rx2 = Math.min(
+                        rw - 1,
+                        rx + 1
+                );
+
+                int a2 = screen.getPixel(x2, y);
+                int b2 = ref.getPixel(rx2, ry);
+
+                int al =
+                        (Color.red(a)*3
+                        + Color.green(a)*5
+                        + Color.blue(a)*2)/10;
+                int al2 =
+                        (Color.red(a2)*3
+                        + Color.green(a2)*5
+                        + Color.blue(a2)*2)/10;
+
+                int bl =
+                        (Color.red(b)*3
+                        + Color.green(b)*5
+                        + Color.blue(b)*2)/10;
+                int bl2 =
+                        (Color.red(b2)*3
+                        + Color.green(b2)*5
+                        + Color.blue(b2)*2)/10;
+
+                boolean ae =
+                        Math.abs(al-al2) > 20;
+                boolean be =
+                        Math.abs(bl-bl2) > 20;
+
+                double edge = ae == be
+                        ? 1.0
+                        : 0.0;
+
+                weightedColor += color * weight;
+                weightedEdge += edge * weight;
+                weightSum += weight;
+            }
+        }
+
+        if (weightSum <= 0.0) {
+            return 0.0;
+        }
+
+        double colorScore =
+                weightedColor / weightSum;
+        double edgeScore =
+                weightedEdge / weightSum;
+
+        return colorScore * 0.74
+                + edgeScore * 0.26;
+    }
+
+    private void saveVisualScene(
+            VisualScene scene,
+            double confidence) {
+
+        getSharedPreferences(PREFS, MODE_PRIVATE)
+                .edit()
+                .putString(
+                        PREF_VISUAL_SCENE,
+                        scene == null
+                                ? "UNKNOWN"
+                                : scene.name()
+                )
+                .putString(
+                        PREF_VISUAL_CONFIDENCE,
+                        String.format(
+                                java.util.Locale.US,
+                                "%.3f",
+                                confidence
+                        )
+                )
+                .apply();
     }
 
     private void loadTrollReference() {

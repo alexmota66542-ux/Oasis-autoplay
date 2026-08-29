@@ -1,0 +1,27 @@
+OASIS AUTOPLAY — PACOTE PLANO PARA GITHUB PELO CELULAR
+
+Este pacote foi feito para que você possa extrair e enviar os arquivos diretamente para a RAIZ do repositório.
+
+Envie para a raiz:
+- AndroidManifest.xml
+- MainActivity.java
+- OasisAccessibilityService.java
+- strings.xml
+- accessibility_service_config.xml
+- todas as imagens .png
+- build-apk.yml
+
+IMPORTANTE:
+Depois de enviar build-apk.yml para a raiz, no GitHub mova/substitua o conteúdo de:
+.github/workflows/build-apk.yml
+pelo conteúdo deste build-apk.yml.
+
+O workflow foi ajustado para procurar TODAS as imagens .png diretamente na raiz do repositório e copiá-las para app/src/main/assets durante o build.
+
+Você NÃO precisa criar a pasta assets manualmente.
+
+NÃO envie:
+- arquivos .jks
+- pacote PRIVATE_SIGNING
+- senhas
+- valores dos Repository Secrets
