@@ -45,6 +45,7 @@ jobs:
           mkdir -p app/src/main/java/com/oasisautoplay
           mkdir -p app/src/main/res/values
           mkdir -p app/src/main/res/xml
+          mkdir -p app/src/main/assets
 
           cp MainActivity.java \
             app/src/main/java/com/oasisautoplay/MainActivity.java
@@ -60,6 +61,20 @@ jobs:
 
           cp accessibility_service_config.xml \
             app/src/main/res/xml/accessibility_service_config.xml
+
+          # Referência visual usada para reconhecer os Trolls.
+          # Funciona com o arquivo dentro de assets/
+          # ou diretamente na raiz do repositório.
+          if [ -f "assets/troll_reference.png" ]; then
+            cp assets/troll_reference.png \
+              app/src/main/assets/troll_reference.png
+          elif [ -f "troll_reference.png" ]; then
+            cp troll_reference.png \
+              app/src/main/assets/troll_reference.png
+          else
+            echo "ERRO: troll_reference.png não encontrado."
+            exit 1
+          fi
 
           cat > settings.gradle <<'EOF'
           pluginManagement {
